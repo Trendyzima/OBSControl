@@ -6,10 +6,14 @@ import { cn } from '@/lib/utils';
 interface ProgramMonitorProps {
   state: StudioState;
   canvasRef: React.RefObject<HTMLCanvasElement>;
+  previewCanvasRef: React.RefObject<HTMLCanvasElement>;
   videoElemRef: React.RefObject<HTMLVideoElement>;
   mediaVideoRef: React.RefObject<HTMLVideoElement>;
   mediaImageRef: React.RefObject<HTMLImageElement>;
+  pipVideoRef: React.RefObject<HTMLVideoElement>;
   duration: number;
+  onTakeToProgram?: () => void;
+  onPreviewScene?: (id: string) => void;
 }
 
 function formatDur(s: number) {
@@ -20,67 +24,91 @@ function formatDur(s: number) {
 }
 
 export default function ProgramMonitor({
-  state, canvasRef, videoElemRef, mediaVideoRef, mediaImageRef, duration
+  state, canvasRef, previewCanvasRef, videoElemRef, mediaVideoRef, mediaImageRef, pipVideoRef,
+  duration, onTakeToProgram
 }: ProgramMonitorProps) {
-  const { isLive, isRecording, currentSceneId, scenes } = state;
+  const { isLive, isRecording, currentSceneId, previewSceneId, scenes } = state;
   const currentScene = scenes.find(s => s.id === currentSceneId);
+  const previewScene = scenes.find(s => s.id === previewSceneId);
 
   return (
-    <div className="flex flex-col gap-0">
-      {/* Monitor frame */}
-      <div className={cn(
-        'relative rounded-2xl overflow-hidden border-2 transition-all duration-300',
-        isLive ? 'border-red-500 shadow-[0_0_24px_rgba(220,38,38,0.5)]' :
-        isRecording ? 'border-amber-500 shadow-[0_0_24px_rgba(245,158,11,0.4)]' :
-        'border-border'
-      )}>
-        {/* Canvas — the actual program output */}
-        <canvas
-          ref={canvasRef}
-          width={1280}
-          height={720}
-          className="w-full block"
-          style={{ aspectRatio: '16/9', background: '#0d0d1a' }}
-        />
+    <div className="space-y-2">
+      {/* Hidden media elements */}
+      <video ref={videoElemRef} className="hidden" playsInline muted autoPlay />
+      <video ref={mediaVideoRef} className="hidden" playsInline muted loop />
+      <img ref={mediaImageRef} className="hidden" alt="" />
+      <video ref={pipVideoRef} className="hidden" playsInline muted autoPlay />
 
-        {/* Hidden video elements for rendering */}
-        <video ref={videoElemRef} className="hidden" playsInline muted autoPlay />
-        <video ref={mediaVideoRef} className="hidden" playsInline muted loop />
-        <img ref={mediaImageRef} className="hidden" alt="" />
-
-        {/* LIVE badge */}
-        {isLive && (
-          <div className="absolute top-3 left-3 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-red-600 shadow-lg">
-            <Wifi size={12} className="text-white" />
-            <span className="font-mono-console text-xs font-bold text-white tracking-widest">LIVE</span>
-            <span className="font-mono-console text-xs text-white/80">{formatDur(duration)}</span>
+      {/* Dual monitor row */}
+      <div className="grid grid-cols-2 gap-2">
+        {/* PREVIEW bus */}
+        <div className="flex flex-col gap-1">
+          <div className="flex items-center justify-between px-1">
+            <span className="font-mono-console text-[9px] uppercase tracking-widest text-emerald-400 font-bold">Preview</span>
+            {previewScene && <span className="font-mono-console text-[9px] text-muted-foreground truncate max-w-[80px]">{previewScene.name}</span>}
           </div>
-        )}
-
-        {/* REC badge */}
-        {isRecording && !isLive && (
-          <div className="absolute top-3 left-3 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-amber-600 shadow-lg">
-            <Circle size={10} className="fill-white text-white animate-pulse" />
-            <span className="font-mono-console text-xs font-bold text-white tracking-widest">REC</span>
-            <span className="font-mono-console text-xs text-white/80">{formatDur(duration)}</span>
+          <div className="relative rounded-xl overflow-hidden border-2 border-emerald-500/60 shadow-[0_0_10px_rgba(16,185,129,0.25)]">
+            <canvas
+              ref={previewCanvasRef}
+              width={640}
+              height={360}
+              className="w-full block"
+              style={{ aspectRatio: '16/9', background: '#050510' }}
+            />
+            <div className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded bg-emerald-600/90 font-mono-console text-[8px] text-white font-bold tracking-widest">
+              PVW
+            </div>
           </div>
-        )}
+        </div>
 
-        {/* Current scene label */}
-        <div className="absolute bottom-3 right-3">
-          <span className="font-mono-console text-[10px] text-white/60 bg-black/50 px-2 py-1 rounded backdrop-blur-sm">
-            {currentScene?.name}
-          </span>
+        {/* PROGRAM bus */}
+        <div className="flex flex-col gap-1">
+          <div className="flex items-center justify-between px-1">
+            <span className="font-mono-console text-[9px] uppercase tracking-widest text-red-400 font-bold">Program</span>
+            <span className="font-mono-console text-[9px] text-muted-foreground tabular-nums">{formatDur(duration)}</span>
+          </div>
+          <div className={cn(
+            'relative rounded-xl overflow-hidden border-2 transition-all duration-300',
+            isLive ? 'border-red-500 shadow-[0_0_16px_rgba(220,38,38,0.5)]' :
+            isRecording ? 'border-amber-500 shadow-[0_0_16px_rgba(245,158,11,0.4)]' :
+            'border-red-500/40'
+          )}>
+            <canvas
+              ref={canvasRef}
+              width={1280}
+              height={720}
+              className="w-full block"
+              style={{ aspectRatio: '16/9', background: '#0d0d1a' }}
+            />
+            <div className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded bg-red-600/90 font-mono-console text-[8px] text-white font-bold tracking-widest">
+              {isLive ? '🔴 LIVE' : isRecording ? '⏺ REC' : 'PGM'}
+            </div>
+            {currentScene && (
+              <div className="absolute bottom-1.5 right-1.5 px-1.5 py-0.5 rounded bg-black/60 backdrop-blur-sm">
+                <span className="font-mono-console text-[8px] text-white/70">{currentScene.name}</span>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
+      {/* T-bar / CUT button */}
+      {onTakeToProgram && (
+        <button
+          onClick={onTakeToProgram}
+          className="w-full py-2.5 rounded-xl bg-red-600/20 border-2 border-red-500/60 hover:bg-red-600/40 hover:border-red-500 text-red-400 font-mono-console text-xs font-bold tracking-widest uppercase transition-all active:scale-[0.98] shadow-[0_0_12px_rgba(220,38,38,0.2)]"
+        >
+          ⚡ CUT — TAKE TO PROGRAM
+        </button>
+      )}
+
       {/* Status bar */}
-      <div className="flex items-center gap-3 px-1 pt-1.5">
-        <div className={cn('w-2 h-2 rounded-full shrink-0', isLive ? 'bg-red-500 animate-pulse' : isRecording ? 'bg-amber-500 animate-pulse' : 'bg-muted-foreground/30')} />
-        <span className="font-mono-console text-[10px] text-muted-foreground flex-1">
-          {isLive ? 'STREAMING LIVE' : isRecording ? 'RECORDING' : 'PREVIEW'}
+      <div className="flex items-center gap-2 px-1">
+        <div className={cn('w-2 h-2 rounded-full shrink-0', isLive ? 'bg-red-500 animate-pulse' : isRecording ? 'bg-amber-500 animate-pulse' : 'bg-muted-foreground/20')} />
+        <span className="font-mono-console text-[9px] text-muted-foreground flex-1">
+          {isLive ? 'STREAMING LIVE' : isRecording ? 'RECORDING' : 'PREVIEW MODE'}
         </span>
-        <span className="font-mono-console text-[10px] text-muted-foreground tabular-nums">{formatDur(duration)}</span>
+        <span className="font-mono-console text-[9px] text-muted-foreground tabular-nums">{formatDur(duration)}</span>
       </div>
     </div>
   );
