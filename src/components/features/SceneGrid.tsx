@@ -3,7 +3,8 @@ import { OBSScene, TransitionType } from '@/types/obs';
 import { Camera, Users, Newspaper, Video, Image, Megaphone, Play, LogOut, Clock, Expand } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import ScenePreviewModal from '@/components/features/ScenePreviewModal';
+import ScenePreviewModal from './ScenePreviewModal';
+import SceneTransitionPreview from './SceneTransitionPreview';
 
 const SCENE_ICONS: Record<string, React.ElementType> = {
   'LIVE CAMERA': Camera,
@@ -48,12 +49,32 @@ interface SceneGridProps {
   onSwitchScene: (name: string) => void;
   onSetTransition: (t: TransitionType) => void;
   disabled: boolean;
+  enableTransitionPreview?: boolean;
 }
 
 const TRANSITIONS: TransitionType[] = ['Cut', 'Fade', 'Swipe', 'Stinger'];
 
-export default function SceneGrid({ scenes, currentScene, transition, onSwitchScene, onSetTransition, disabled }: SceneGridProps) {
+export default function SceneGrid({ scenes, currentScene, transition, onSwitchScene, onSetTransition, disabled, enableTransitionPreview = false }: SceneGridProps) {
   const [previewScene, setPreviewScene] = useState<OBSScene | null>(null);
+  const [pendingScene, setPendingScene] = useState<OBSScene | null>(null);
+
+  const fromScene = scenes.find(s => s.sceneName === currentScene) ?? null;
+
+  function handleSceneClick(scene: OBSScene) {
+    if (disabled || scene.sceneName === currentScene) return;
+    if (enableTransitionPreview && transition !== 'Cut') {
+      setPendingScene(scene);
+    } else {
+      onSwitchScene(scene.sceneName);
+    }
+  }
+
+  function confirmTransition() {
+    if (pendingScene) {
+      onSwitchScene(pendingScene.sceneName);
+      setPendingScene(null);
+    }
+  }
 
   return (
     <>
@@ -89,7 +110,7 @@ export default function SceneGrid({ scenes, currentScene, transition, onSwitchSc
             return (
               <div key={scene.sceneName} className="relative group">
                 <button
-                  onClick={() => !disabled && onSwitchScene(scene.sceneName)}
+                  onClick={() => handleSceneClick(scene)}
                   disabled={disabled}
                   title={`[${idx + 1}] ${scene.sceneName}`}
                   className={cn(
@@ -162,6 +183,16 @@ export default function SceneGrid({ scenes, currentScene, transition, onSwitchSc
         transition={transition}
         onClose={() => setPreviewScene(null)}
         onSwitch={onSwitchScene}
+      />
+
+      {/* Transition preview modal */}
+      <SceneTransitionPreview
+        open={pendingScene !== null}
+        fromScene={fromScene}
+        toScene={pendingScene}
+        transition={transition}
+        onConfirm={confirmTransition}
+        onCancel={() => setPendingScene(null)}
       />
     </>
   );

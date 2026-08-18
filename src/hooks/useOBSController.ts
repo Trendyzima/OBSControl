@@ -10,26 +10,111 @@ import {
 } from '@/lib/obs-mock';
 import { toast } from 'sonner';
 
-// ─── OBS WebSocket real integration ──────────────────────────────────────────
-type OBSWSClient = {
-  connect(url: string, password?: string): Promise<void>;
-  disconnect(): void;
-  call(requestType: string, requestData?: Record<string, unknown>): Promise<unknown>;
-  on(event: string, cb: (data: unknown) => void): void;
-  off(event: string, cb: (data: unknown) => void): void;
-};
+// ─── Raw OBS WebSocket (protocol v5 / obs-websocket 5.x) ─────────────────────
+// We implement the OBS WS protocol directly to avoid the obs-websocket-js package
 
-let OBSWebSocket: (new () => OBSWSClient) | null = null;
+interface OBSWSMessage {
+  op: number;
+  d: Record<string, unknown>;
+}
 
-async function loadOBSWebSocket() {
-  if (OBSWebSocket) return OBSWebSocket;
-  try {
-    const mod = await import('obs-websocket-js');
-    OBSWebSocket = mod.default as unknown as new () => OBSWSClient;
-  } catch {
-    OBSWebSocket = null;
+type OBSEventHandler = (data: Record<string, unknown>) => void;
+
+class OBSRawWebSocket {
+  private ws: WebSocket | null = null;
+  private password = '';
+  private reqId = 0;
+  private pendingRequests = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+  private eventHandlers = new Map<string, OBSEventHandler[]>();
+
+  async connect(url: string, password?: string): Promise<void> {
+    this.password = password || '';
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(url, ['obswebsocket.json']);
+      this.ws = ws;
+
+      const timeout = setTimeout(() => reject(new Error('Connection timeout')), 8000);
+
+      ws.onmessage = async (event) => {
+        const msg: OBSWSMessage = JSON.parse(event.data);
+        if (msg.op === 0) {
+          // Hello — send Identify
+          const identify: OBSWSMessage = { op: 1, d: { rpcVersion: 1 } };
+          if (this.password && msg.d.authentication) {
+            const auth = msg.d.authentication as { challenge: string; salt: string };
+            identify.d.authentication = await this.buildAuth(this.password, auth.salt, auth.challenge);
+          }
+          ws.send(JSON.stringify(identify));
+        } else if (msg.op === 2) {
+          // Identified
+          clearTimeout(timeout);
+          resolve();
+        } else if (msg.op === 7) {
+          // RequestResponse
+          const d = msg.d as { requestId: string; requestStatus: { result: boolean; comment?: string }; responseData?: unknown };
+          const pending = this.pendingRequests.get(d.requestId);
+          if (pending) {
+            this.pendingRequests.delete(d.requestId);
+            if (d.requestStatus.result) {
+              pending.resolve(d.responseData ?? {});
+            } else {
+              pending.reject(new Error(d.requestStatus.comment || 'Request failed'));
+            }
+          }
+        } else if (msg.op === 5) {
+          // Event
+          const d = msg.d as { eventType: string; eventData?: Record<string, unknown> };
+          const handlers = this.eventHandlers.get(d.eventType);
+          if (handlers) handlers.forEach(h => h(d.eventData || {}));
+        }
+      };
+
+      ws.onerror = () => { clearTimeout(timeout); reject(new Error('WebSocket connection failed')); };
+      ws.onclose = (e) => {
+        if (!e.wasClean) reject(new Error(`Connection closed unexpectedly (code ${e.code})`));
+      };
+    });
   }
-  return OBSWebSocket;
+
+  private async buildAuth(password: string, salt: string, challenge: string): Promise<string> {
+    const enc = new TextEncoder();
+    const base64Hash = async (data: ArrayBuffer) => btoa(String.fromCharCode(...new Uint8Array(data)));
+    const hash1 = await crypto.subtle.digest('SHA-256', enc.encode(password + salt));
+    const secret = btoa(String.fromCharCode(...new Uint8Array(hash1)));
+    const hash2 = await crypto.subtle.digest('SHA-256', enc.encode(secret + challenge));
+    return base64Hash(hash2);
+  }
+
+  async call(requestType: string, requestData?: Record<string, unknown>): Promise<unknown> {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) throw new Error('Not connected');
+    const requestId = `req-${++this.reqId}`;
+    return new Promise((resolve, reject) => {
+      this.pendingRequests.set(requestId, { resolve, reject });
+      this.ws!.send(JSON.stringify({ op: 6, d: { requestType, requestId, requestData: requestData || {} } }));
+      setTimeout(() => {
+        if (this.pendingRequests.has(requestId)) {
+          this.pendingRequests.delete(requestId);
+          reject(new Error(`Request timeout: ${requestType}`));
+        }
+      }, 5000);
+    });
+  }
+
+  on(event: string, handler: OBSEventHandler) {
+    if (!this.eventHandlers.has(event)) this.eventHandlers.set(event, []);
+    this.eventHandlers.get(event)!.push(handler);
+  }
+
+  off(event: string, handler: OBSEventHandler) {
+    const handlers = this.eventHandlers.get(event);
+    if (handlers) this.eventHandlers.set(event, handlers.filter(h => h !== handler));
+  }
+
+  disconnect() {
+    this.ws?.close();
+    this.ws = null;
+    this.pendingRequests.clear();
+  }
 }
 
 // ─── Event log helpers ───────────────────────────────────────────────────────
@@ -73,7 +158,7 @@ export function useOBSController() {
   const [recordings, setRecordings] = useState<RecordingFile[]>([]);
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const obsRef = useRef<OBSWSClient | null>(null);
+  const obsRef = useRef<OBSRawWebSocket | null>(null);
   const screenRecorderRef = useRef<MediaRecorder | null>(null);
   const screenChunksRef = useRef<Blob[]>([]);
   const screenStartRef = useRef<number>(0);
@@ -178,66 +263,60 @@ export function useOBSController() {
     setActiveProfile(profile);
     addEvent('info', 'connection', `Connecting to ${profile.host}:${profile.port}`, profile.name);
 
-    const OBSClass = await loadOBSWebSocket();
+    const obs = new OBSRawWebSocket();
+    obsRef.current = obs;
 
-    if (OBSClass) {
-      const obs = new OBSClass();
-      obsRef.current = obs;
-      try {
-        await obs.connect(`ws://${profile.host}:${profile.port}`, profile.password || undefined);
-        setIsRealOBS(true);
-        setStatus('connected');
-        addEvent('success', 'connection', `Connected via WebSocket`, `${profile.host}:${profile.port}`);
+    try {
+      await obs.connect(`ws://${profile.host}:${profile.port}`, profile.password || undefined);
+      setIsRealOBS(true);
+      setStatus('connected');
+      addEvent('success', 'connection', `Connected via WebSocket`, `${profile.host}:${profile.port}`);
 
-        const sceneData = await obs.call('GetSceneList') as { scenes: { sceneName: string; sceneIndex: number }[]; currentProgramSceneName: string };
-        if (sceneData?.scenes) {
-          setScenes(sceneData.scenes.map((s, i) => ({ sceneName: s.sceneName, sceneIndex: i })));
-        }
-        if (sceneData?.currentProgramSceneName) {
-          setCurrentScene(sceneData.currentProgramSceneName);
-        }
-
-        obs.on('CurrentProgramSceneChanged', (d: unknown) => {
-          const data = d as { sceneName: string };
-          setCurrentScene(data.sceneName);
-          addEvent('info', 'scene', `Scene changed → ${data.sceneName}`);
-        });
-
-        obs.on('StreamStateChanged', (d: unknown) => {
-          const data = d as { outputActive: boolean };
-          setStreamStatus(prev => ({ ...prev, streaming: data.outputActive }));
-          if (data.outputActive) {
-            startStreamTimer();
-            addEvent('success', 'stream', 'Stream started');
-          } else {
-            stopStreamTimer();
-            setStreamStatus(prev => ({ ...prev, bitrate: 0, fps: 30 }));
-            addEvent('info', 'stream', 'Stream stopped');
-          }
-        });
-
-        obs.on('RecordStateChanged', (d: unknown) => {
-          const data = d as { outputActive: boolean };
-          setStreamStatus(prev => ({ ...prev, recording: data.outputActive }));
-          addEvent('info', 'record', data.outputActive ? 'OBS recording started' : 'OBS recording stopped');
-        });
-
-        const profiles = loadProfiles();
-        const updated = profiles.map(p =>
-          p.id === profile.id ? { ...p, lastConnected: new Date().toISOString() } : p
-        );
-        saveProfiles(updated);
-        toast.success(`Connected to OBS (real WebSocket): ${profile.name}`);
-      } catch (err: unknown) {
-        setStatus('error');
-        setActiveProfile(null);
-        obsRef.current = null;
-        setIsRealOBS(false);
-        addEvent('error', 'connection', 'Connection failed', (err as Error).message);
-        toast.error((err as Error).message || 'OBS WebSocket connection failed');
+      const sceneData = await obs.call('GetSceneList') as { scenes: { sceneName: string; sceneIndex: number }[]; currentProgramSceneName: string };
+      if (sceneData?.scenes) {
+        setScenes(sceneData.scenes.map((s, i) => ({ sceneName: s.sceneName, sceneIndex: i })));
       }
-    } else {
+      if (sceneData?.currentProgramSceneName) {
+        setCurrentScene(sceneData.currentProgramSceneName);
+      }
+
+      obs.on('CurrentProgramSceneChanged', (d) => {
+        const data = d as { sceneName: string };
+        setCurrentScene(data.sceneName);
+        addEvent('info', 'scene', `Scene changed → ${data.sceneName}`);
+      });
+
+      obs.on('StreamStateChanged', (d) => {
+        const data = d as { outputActive: boolean };
+        setStreamStatus(prev => ({ ...prev, streaming: data.outputActive }));
+        if (data.outputActive) {
+          startStreamTimer();
+          addEvent('success', 'stream', 'Stream started');
+        } else {
+          stopStreamTimer();
+          setStreamStatus(prev => ({ ...prev, bitrate: 0, fps: 30 }));
+          addEvent('info', 'stream', 'Stream stopped');
+        }
+      });
+
+      obs.on('RecordStateChanged', (d) => {
+        const data = d as { outputActive: boolean };
+        setStreamStatus(prev => ({ ...prev, recording: data.outputActive }));
+        addEvent('info', 'record', data.outputActive ? 'OBS recording started' : 'OBS recording stopped');
+      });
+
+      const profiles = loadProfiles();
+      const updated = profiles.map(p =>
+        p.id === profile.id ? { ...p, lastConnected: new Date().toISOString() } : p
+      );
+      saveProfiles(updated);
+      toast.success(`Connected to OBS (WebSocket): ${profile.name}`);
+    } catch (err: unknown) {
+      // Fall back to demo mode
+      obsRef.current = null;
       setIsRealOBS(false);
+      addEvent('warning', 'connection', `Real OBS not found — demo mode`, (err as Error).message);
+
       try {
         await simulateConnect();
         setStatus('connected');
@@ -250,11 +329,11 @@ export function useOBSController() {
         );
         saveProfiles(updated);
         toast.success(`Connected (demo mode): ${profile.name}`);
-      } catch (err: unknown) {
+      } catch (err2: unknown) {
         setStatus('error');
         setActiveProfile(null);
-        addEvent('error', 'connection', 'Demo connection failed', (err as Error).message);
-        toast.error((err as Error).message || 'Connection failed');
+        addEvent('error', 'connection', 'Demo connection failed', (err2 as Error).message);
+        toast.error((err2 as Error).message || 'Connection failed');
       }
     }
   }, [addEvent, startStreamTimer, stopStreamTimer]);
@@ -347,7 +426,7 @@ export function useOBSController() {
   const startScreenRecording = useCallback(async () => {
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { frameRate: 30 },
+        video: { frameRate: 30 } as MediaTrackConstraints,
         audio: true,
       });
       screenChunksRef.current = [];
@@ -365,13 +444,11 @@ export function useOBSController() {
         const durationSeconds = Math.floor((Date.now() - screenStartRef.current) / 1000);
         const name = `screen-${new Date().toISOString().replace(/[:.]/g, '-')}.webm`;
 
-        // Auto-download
         const a = document.createElement('a');
         a.href = url;
         a.download = name;
         a.click();
 
-        // Add to recordings list
         const rec: RecordingFile = {
           id: `rec-${Date.now()}`,
           name,
