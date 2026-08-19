@@ -22,6 +22,13 @@ export interface PiPSource {
   size: number; // 15–40 percent of canvas width
 }
 
+export interface ChromaKeySettings {
+  enabled: boolean;
+  color: string;   // hex target color
+  tolerance: number; // 0–100
+  softness: number;  // 0–100
+}
+
 export interface StudioScene {
   id: string;
   name: string;
@@ -44,6 +51,8 @@ export interface StudioScene {
   category?: 'main' | 'ad' | 'transition' | 'graphics';
   /** Duration in seconds (for ads/rundown) */
   plannedDuration?: number;
+  /** Chroma key settings for camera scenes */
+  chromaKey?: ChromaKeySettings;
 }
 
 export interface AudioTrack {
@@ -64,7 +73,7 @@ export interface StreamOutput {
   rtmpUrl: string;
   streamKey: string;
   platform: 'youtube' | 'facebook' | 'twitch' | 'custom';
-  resolution: '1920x1080' | '1280x720' | '854x480';
+  resolution: '3840x2160' | '1920x1080' | '1280x720' | '854x480';
   fps: 30 | 60;
   bitrate: number; // kbps
   folderHandle?: FileSystemDirectoryHandle | null;
@@ -100,7 +109,7 @@ export interface AdSlot {
 
 export interface StudioState {
   currentSceneId: string;
-  previewSceneId: string; // what's in Preview bus
+  previewSceneId: string;
   scenes: StudioScene[];
   audioTracks: AudioTrack[];
   output: StreamOutput;
@@ -112,10 +121,36 @@ export interface StudioState {
   transitionDuration: number; // ms
   pip: PiPSource;
   health: StreamHealth;
+  chromaKey: ChromaKeySettings;
+  captions: string;
+  captionsEnabled: boolean;
 }
 
 export interface CameraDevice {
   deviceId: string;
   label: string;
   facing?: 'user' | 'environment';
+}
+
+export interface GuestPeer {
+  id: string;
+  name: string;
+  stream: MediaStream | null;
+  connected: boolean;
+  muted: boolean;
+  volume: number;
+}
+
+// Analytics data collected during broadcast
+export interface BroadcastAnalytics {
+  sessionStart: number;
+  sessionEnd: number | null;
+  totalDuration: number;
+  sceneSwitches: { time: number; from: string; to: string }[];
+  healthHistory: { time: number; score: number; bitrate: number }[];
+  peakBitrate: number;
+  avgBitrate: number;
+  adBreaks: number;
+  tickerMessages: number;
+  sceneUsage: Record<string, number>; // sceneId -> seconds
 }

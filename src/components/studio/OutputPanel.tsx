@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { StreamOutput, StudioState, StreamHealth } from '@/types/studio';
 import { Radio, Circle, Square, Wifi, HardDrive, FolderOpen, Activity, ChevronDown, ChevronUp, Info, ExternalLink } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -13,14 +13,20 @@ interface OutputPanelProps {
 }
 
 const PLATFORMS = [
-  { id: 'youtube', label: 'YT', color: 'text-red-500', whipHint: 'https://stream.youtube.com/live2/YOUR_KEY/whip' },
-  { id: 'facebook', label: 'FB', color: 'text-blue-400', whipHint: 'https://media-api.facebook.com/rtmp/YOUR_KEY/whip' },
-  { id: 'twitch', label: 'TTW', color: 'text-purple-400', whipHint: 'https://ingest.global-contribute.live-video.net/app/YOUR_KEY' },
-  { id: 'custom', label: 'Custom', color: 'text-muted-foreground', whipHint: 'https://your-whip-endpoint/live' },
+  { id: 'youtube',  label: 'YT',     color: 'text-red-500',       whipHint: 'https://stream.youtube.com/live2/YOUR_KEY/whip' },
+  { id: 'facebook', label: 'FB',     color: 'text-blue-400',      whipHint: 'https://media-api.facebook.com/rtmp/YOUR_KEY/whip' },
+  { id: 'twitch',   label: 'Twitch', color: 'text-purple-400',    whipHint: 'https://ingest.global-contribute.live-video.net/app/YOUR_KEY' },
+  { id: 'custom',   label: 'Custom', color: 'text-muted-foreground', whipHint: 'https://your-whip-endpoint/live' },
 ] as const;
 
-const RESOLUTIONS = ['1920x1080', '1280x720', '854x480'] as const;
-const BITRATES = [{ label: '2M', value: 2000 }, { label: '4M', value: 4000 }, { label: '6M', value: 6000 }, { label: '8M', value: 8000 }];
+const RESOLUTIONS = ['3840x2160', '1920x1080', '1280x720', '854x480'] as const;
+const BITRATES = [
+  { label: '2M', value: 2000 },
+  { label: '4M', value: 4000 },
+  { label: '6M', value: 6000 },
+  { label: '8M', value: 8000 },
+  { label: '12M', value: 12000 },
+];
 
 function formatDur(s: number) {
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
@@ -28,7 +34,7 @@ function formatDur(s: number) {
 }
 
 function HealthBar({ health }: { health: StreamHealth }) {
-  const color = health.score >= 80 ? 'bg-emerald-500' : health.score >= 50 ? 'bg-amber-400' : health.score > 0 ? 'bg-red-500' : 'bg-muted-foreground/20';
+  const color   = health.score >= 80 ? 'bg-emerald-500' : health.score >= 50 ? 'bg-amber-400' : health.score > 0 ? 'bg-red-500' : 'bg-muted-foreground/20';
   const textColor = health.score >= 80 ? 'text-emerald-400' : health.score >= 50 ? 'text-amber-400' : health.score > 0 ? 'text-red-400' : 'text-muted-foreground';
   return (
     <div className="space-y-2 p-3 rounded-xl border border-border bg-secondary/10">
@@ -44,7 +50,7 @@ function HealthBar({ health }: { health: StreamHealth }) {
       <div className="grid grid-cols-3 gap-2">
         {[
           { label: 'Bitrate', value: health.estimatedBitrate > 0 ? `${health.estimatedBitrate}k` : '—' },
-          { label: 'Status', value: health.encoderStatus },
+          { label: 'Status',  value: health.encoderStatus },
           { label: 'Dropped', value: String(health.droppedFrames) },
         ].map(m => (
           <div key={m.label} className="text-center">
@@ -74,34 +80,38 @@ export default function OutputPanel({ state, output, onOutputChange, onStart, on
       <div className="grid grid-cols-3 gap-1.5">
         <button onClick={() => onOutputChange({ mode: 'record' })} disabled={isActive}
           className={cn('flex flex-col items-center justify-center gap-1 py-2.5 rounded-xl border-2 font-mono-console text-[9px] transition-colors',
-            output.mode === 'record' ? 'border-amber-500 bg-amber-500/10 text-amber-400' : 'border-border text-muted-foreground hover:text-foreground disabled:opacity-40')}>
+            output.mode === 'record'
+              ? 'border-amber-500 bg-amber-500/10 text-amber-400'
+              : 'border-border text-muted-foreground hover:text-foreground disabled:opacity-40')}>
           <HardDrive size={13} />Download
         </button>
         {fsSupported && (
           <button onClick={() => onOutputChange({ mode: 'folder' })} disabled={isActive}
             className={cn('flex flex-col items-center justify-center gap-1 py-2.5 rounded-xl border-2 font-mono-console text-[9px] transition-colors',
-              output.mode === 'folder' ? 'border-cyan-500 bg-cyan-500/10 text-cyan-400' : 'border-border text-muted-foreground hover:text-foreground disabled:opacity-40')}>
+              output.mode === 'folder'
+                ? 'border-cyan-500 bg-cyan-500/10 text-cyan-400'
+                : 'border-border text-muted-foreground hover:text-foreground disabled:opacity-40')}>
             <FolderOpen size={13} />Folder
           </button>
         )}
         <button onClick={() => onOutputChange({ mode: 'whip' })} disabled={isActive}
           className={cn('flex flex-col items-center justify-center gap-1 py-2.5 rounded-xl border-2 font-mono-console text-[9px] transition-colors',
-            output.mode === 'whip' ? 'border-red-500 bg-red-500/10 text-red-400' : 'border-border text-muted-foreground hover:text-foreground disabled:opacity-40')}>
+            output.mode === 'whip'
+              ? 'border-red-500 bg-red-500/10 text-red-400'
+              : 'border-border text-muted-foreground hover:text-foreground disabled:opacity-40')}>
           <Wifi size={13} />Go Live
         </button>
       </div>
 
-      {/* Folder mode info */}
+      {/* Mode info banners */}
       {output.mode === 'folder' && !isActive && (
         <div className="p-3 rounded-xl border border-cyan-500/20 bg-cyan-500/5">
           <p className="font-mono-console text-[10px] text-cyan-400 font-semibold">Direct Folder Save</p>
           <p className="font-mono-console text-[10px] text-muted-foreground mt-1 leading-relaxed">
-            Click Start — you'll be prompted to choose a folder. Recording saves directly there in real-time. No download needed when stopped.
+            Click Start → choose folder → recording saves directly there in real-time, no download needed.
           </p>
         </div>
       )}
-
-      {/* Record mode info */}
       {output.mode === 'record' && !isActive && (
         <div className="p-3 rounded-xl border border-amber-500/20 bg-amber-500/5">
           <p className="font-mono-console text-[10px] text-amber-400 font-semibold">Local Recording</p>
@@ -111,14 +121,16 @@ export default function OutputPanel({ state, output, onOutputChange, onStart, on
         </div>
       )}
 
-      {/* WHIP settings */}
+      {/* WHIP config */}
       {output.mode === 'whip' && !isActive && (
         <div className="space-y-2">
           <div className="flex gap-1">
             {PLATFORMS.map(p => (
               <button key={p.id} onClick={() => onOutputChange({ platform: p.id })}
                 className={cn('flex-1 py-1.5 rounded-lg font-mono-console text-[9px] uppercase tracking-wide border transition-colors',
-                  output.platform === p.id ? `border-current bg-current/10 ${p.color}` : 'border-border text-muted-foreground hover:text-foreground')}>
+                  output.platform === p.id
+                    ? `border-current bg-current/10 ${p.color}`
+                    : 'border-border text-muted-foreground hover:text-foreground')}>
                 {p.label}
               </button>
             ))}
@@ -141,7 +153,9 @@ export default function OutputPanel({ state, output, onOutputChange, onStart, on
           {showWhipInfo && (
             <div className="p-3 rounded-xl border border-blue-500/30 bg-blue-500/5 space-y-1.5">
               <p className="font-mono-console text-[10px] text-blue-400 font-semibold">WHIP = Browser-native live streaming</p>
-              <p className="font-mono-console text-[10px] text-muted-foreground leading-relaxed">Natively: Cloudflare Stream, Mux. For YouTube/Twitch/FB use a WHIP-to-RTMP relay.</p>
+              <p className="font-mono-console text-[10px] text-muted-foreground leading-relaxed">
+                Natively: Cloudflare Stream, Mux. For YouTube/Twitch/FB use a WHIP-to-RTMP relay.
+              </p>
               <a href="https://github.com/Sean-Der/whip-to-rtmp" target="_blank" rel="noopener noreferrer"
                 className="font-mono-console text-[10px] text-blue-400 underline flex items-center gap-1">
                 whip-to-rtmp relay <ExternalLink size={9} />
@@ -160,38 +174,47 @@ export default function OutputPanel({ state, output, onOutputChange, onStart, on
             {showSettings ? <ChevronUp size={12} className="text-muted-foreground" /> : <ChevronDown size={12} className="text-muted-foreground" />}
           </button>
           {showSettings && (
-            <div className="space-y-2 p-3 rounded-xl border border-border bg-secondary/10">
+            <div className="space-y-3 p-3 rounded-xl border border-border bg-secondary/10">
+              {/* Resolution */}
               <div>
                 <label className="font-mono-console text-[9px] text-muted-foreground uppercase block mb-1">Resolution</label>
-                <div className="flex gap-1">
+                <div className="grid grid-cols-2 gap-1">
                   {RESOLUTIONS.map(r => (
                     <button key={r} onClick={() => onOutputChange({ resolution: r })}
-                      className={cn('flex-1 py-1.5 rounded-lg border font-mono-console text-[9px] transition-colors',
-                        output.resolution === r ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted-foreground hover:text-foreground')}>
-                      {r.split('x')[1]}p
+                      className={cn('py-1.5 rounded-lg border font-mono-console text-[9px] transition-colors',
+                        output.resolution === r
+                          ? 'border-primary bg-primary/10 text-primary'
+                          : 'border-border text-muted-foreground hover:text-foreground')}>
+                      {r.split('x')[0] === '3840' ? '4K UHD' : r.split('x')[0] === '1920' ? '1080p FHD' : r.split('x')[0] === '1280' ? '720p HD' : '480p'}
                     </button>
                   ))}
                 </div>
               </div>
+              {/* Bitrate */}
               <div>
                 <label className="font-mono-console text-[9px] text-muted-foreground uppercase block mb-1">Bitrate</label>
-                <div className="flex gap-1">
+                <div className="flex gap-1 flex-wrap">
                   {BITRATES.map(b => (
                     <button key={b.value} onClick={() => onOutputChange({ bitrate: b.value })}
-                      className={cn('flex-1 py-1.5 rounded-lg border font-mono-console text-[9px] transition-colors',
-                        output.bitrate === b.value ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted-foreground hover:text-foreground')}>
+                      className={cn('flex-1 py-1.5 rounded-lg border font-mono-console text-[9px] transition-colors min-w-0',
+                        output.bitrate === b.value
+                          ? 'border-primary bg-primary/10 text-primary'
+                          : 'border-border text-muted-foreground hover:text-foreground')}>
                       {b.label}
                     </button>
                   ))}
                 </div>
               </div>
+              {/* FPS */}
               <div>
                 <label className="font-mono-console text-[9px] text-muted-foreground uppercase block mb-1">Frame Rate</label>
                 <div className="flex gap-1">
                   {([30, 60] as const).map(fps => (
                     <button key={fps} onClick={() => onOutputChange({ fps })}
                       className={cn('flex-1 py-1.5 rounded-lg border font-mono-console text-[9px] transition-colors',
-                        output.fps === fps ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted-foreground hover:text-foreground')}>
+                        output.fps === fps
+                          ? 'border-primary bg-primary/10 text-primary'
+                          : 'border-border text-muted-foreground hover:text-foreground')}>
                       {fps} FPS
                     </button>
                   ))}
@@ -205,16 +228,22 @@ export default function OutputPanel({ state, output, onOutputChange, onStart, on
       {/* Stream health (while active) */}
       {isActive && <HealthBar health={health} />}
 
-      {/* Go / Stop */}
+      {/* Start / Stop */}
       {!isActive ? (
         <button onClick={onStart}
           className={cn('w-full py-4 rounded-2xl font-mono-console text-sm font-bold tracking-widest transition-all active:scale-[0.98]',
-            output.mode === 'whip' ? 'bg-red-600 hover:bg-red-700 text-white shadow-[0_0_20px_rgba(220,38,38,0.4)]' :
-            output.mode === 'folder' ? 'bg-cyan-600 hover:bg-cyan-700 text-white shadow-[0_0_20px_rgba(6,182,212,0.3)]' :
-            'bg-amber-600 hover:bg-amber-700 text-white shadow-[0_0_20px_rgba(245,158,11,0.3)]')}>
+            output.mode === 'whip'
+              ? 'bg-red-600 hover:bg-red-700 text-white shadow-[0_0_20px_rgba(220,38,38,0.4)]'
+              : output.mode === 'folder'
+              ? 'bg-cyan-600 hover:bg-cyan-700 text-white shadow-[0_0_20px_rgba(6,182,212,0.3)]'
+              : 'bg-amber-600 hover:bg-amber-700 text-white shadow-[0_0_20px_rgba(245,158,11,0.3)]')}>
           <div className="flex items-center justify-center gap-2.5">
-            {output.mode === 'whip' ? <Radio size={16} /> : output.mode === 'folder' ? <FolderOpen size={15} /> : <Circle size={14} className="fill-white" />}
-            {output.mode === 'whip' ? 'GO LIVE' : output.mode === 'folder' ? 'RECORD TO FOLDER' : 'START RECORDING'}
+            {output.mode === 'whip'
+              ? <><Radio size={16} /> GO LIVE</>
+              : output.mode === 'folder'
+              ? <><FolderOpen size={15} /> RECORD TO FOLDER</>
+              : <><Circle size={14} className="fill-white" /> START RECORDING</>
+            }
           </div>
         </button>
       ) : (
@@ -229,7 +258,7 @@ export default function OutputPanel({ state, output, onOutputChange, onStart, on
           </div>
           <button onClick={onStop}
             className="w-full py-3.5 rounded-2xl bg-secondary hover:bg-secondary/80 text-foreground font-mono-console text-sm font-bold border border-border transition-colors flex items-center justify-center gap-2">
-            <Square size={14} />STOP
+            <Square size={14} /> STOP
           </button>
         </div>
       )}

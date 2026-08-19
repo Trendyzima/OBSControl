@@ -2,7 +2,8 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import {
   StudioScene, AudioTrack, StudioState, StreamOutput, OverlayText,
-  CameraDevice, TransitionType, PiPSource, StreamHealth, RundownSegment, AdSlot
+  CameraDevice, TransitionType, PiPSource, StreamHealth, RundownSegment, AdSlot,
+  ChromaKeySettings, BroadcastAnalytics
 } from '@/types/studio';
 import { toast } from 'sonner';
 
@@ -34,7 +35,7 @@ const DEFAULT_SCENES: StudioScene[] = [
     id: makeId(), name: 'AD BREAK', sourceType: 'color', bgColor: '#1a0a00', icon: '📢', category: 'ad',
     overlays: [
       { id: 'ov5', text: 'AD BREAK', x: 50, y: 45, fontSize: 60, color: '#ff9900', bgColor: 'transparent', bold: true, visible: true },
-      { id: 'ov6', text: 'We\'ll be right back after these messages', x: 50, y: 62, fontSize: 22, color: '#ffcc66', bgColor: 'transparent', bold: false, visible: true },
+      { id: 'ov6', text: "We'll be right back after these messages", x: 50, y: 62, fontSize: 22, color: '#ffcc66', bgColor: 'transparent', bold: false, visible: true },
     ]
   },
   {
@@ -100,8 +101,76 @@ const DEFAULT_HEALTH: StreamHealth = {
   packetsLost: 0,
 };
 
+const DEFAULT_CHROMA: ChromaKeySettings = {
+  enabled: false,
+  color: '#00b140',
+  tolerance: 40,
+  softness: 20,
+};
+
+const DEFAULT_ANALYTICS: BroadcastAnalytics = {
+  sessionStart: Date.now(),
+  sessionEnd: null,
+  totalDuration: 0,
+  sceneSwitches: [],
+  healthHistory: [],
+  peakBitrate: 0,
+  avgBitrate: 0,
+  adBreaks: 0,
+  tickerMessages: 0,
+  sceneUsage: {},
+};
+
+// Resolution map
+const RESOLUTION_MAP: Record<string, [number, number]> = {
+  '3840x2160': [3840, 2160],
+  '1920x1080': [1920, 1080],
+  '1280x720': [1280, 720],
+  '854x480': [854, 480],
+};
+
 const CANVAS_W = 1280;
 const CANVAS_H = 720;
+
+// ─── Hex to RGB helper ────────────────────────────────────────────────────────
+function hexToRgb(hex: string): [number, number, number] {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return [r, g, b];
+}
+
+// ─── Apply chroma key to canvas context ──────────────────────────────────────
+function applyChromaKey(
+  ctx: CanvasRenderingContext2D,
+  w: number, h: number,
+  color: string,
+  tolerance: number,
+  softness: number
+) {
+  const [kr, kg, kb] = hexToRgb(color);
+  const tol = tolerance * 2.55; // 0-255 range
+  const soft = Math.max(1, softness * 0.5);
+
+  const imageData = ctx.getImageData(0, 0, w, h);
+  const data = imageData.data;
+
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i], g = data[i + 1], b = data[i + 2];
+    const dist = Math.sqrt((r - kr) ** 2 + (g - kg) ** 2 + (b - kb) ** 2);
+
+    if (dist < tol) {
+      // Full removal within tolerance
+      data[i + 3] = 0;
+    } else if (dist < tol + soft) {
+      // Soft edge feathering
+      const alpha = ((dist - tol) / soft) * 255;
+      data[i + 3] = Math.round(alpha);
+    }
+  }
+
+  ctx.putImageData(imageData, 0, 0);
+}
 
 export function useStudioEngine() {
   const [scenes, setScenes] = useState<StudioScene[]>(DEFAULT_SCENES);
@@ -116,24 +185,32 @@ export function useStudioEngine() {
   const [cameras, setCameras] = useState<CameraDevice[]>([]);
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
   const [pipStream, setPipStream] = useState<MediaStream | null>(null);
+  const [guestStream, setGuestStream] = useState<MediaStream | null>(null);
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
   const [ticker, setTicker] = useState('');
   const [tickerVisible, setTickerVisible] = useState(false);
+  const [captions, setCaptions] = useState('');
+  const [captionsEnabled, setCaptionsEnabled] = useState(false);
   const [transition, setTransition] = useState<TransitionType>('cut');
   const [transitionDuration, setTransitionDuration] = useState(300);
   const [pip, setPip] = useState<PiPSource>(DEFAULT_PIP);
   const [health, setHealth] = useState<StreamHealth>(DEFAULT_HEALTH);
+  const [chromaKey, setChromaKey] = useState<ChromaKeySettings>(DEFAULT_CHROMA);
+  const [analytics, setAnalytics] = useState<BroadcastAnalytics>({ ...DEFAULT_ANALYTICS, sessionStart: Date.now() });
 
   // Rundown & ads
   const [rundown, setRundown] = useState<RundownSegment[]>([]);
   const [adSlots, setAdSlots] = useState<AdSlot[]>([]);
 
+  // Refs
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const offscreenRef = useRef<HTMLCanvasElement | null>(null); // for chroma key
   const videoElemRef = useRef<HTMLVideoElement | null>(null);
   const mediaVideoRef = useRef<HTMLVideoElement | null>(null);
   const mediaImageRef = useRef<HTMLImageElement | null>(null);
   const pipVideoRef = useRef<HTMLVideoElement | null>(null);
+  const guestVideoRef = useRef<HTMLVideoElement | null>(null);
 
   const audioCtxRef = useRef<AudioContext | null>(null);
   const micGainRef = useRef<GainNode | null>(null);
@@ -148,11 +225,23 @@ export function useStudioEngine() {
   const chunksRef = useRef<Blob[]>([]);
   const durationRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const healthRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const analyticsRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const tickerXRef = useRef(CANVAS_W);
+  const captionXRef = useRef(0);
+  const captionTextRef = useRef('');
+  const captionVisibleUntilRef = useRef(0);
   const bytesRef = useRef(0);
   const lastByteTimeRef = useRef(Date.now());
   const folderWriterRef = useRef<FileSystemWritableFileStream | null>(null);
   const transitionRef = useRef<{ active: boolean; alpha: number; direction: number }>({ active: false, alpha: 1, direction: -1 });
+  const scenesRef = useRef<StudioScene[]>(scenes);
+  const currentSceneIdRef = useRef(currentSceneId);
+  const analyticsDataRef = useRef<BroadcastAnalytics>({ ...DEFAULT_ANALYTICS, sessionStart: Date.now() });
+  const sceneTimerRef = useRef<{ id: string; start: number } | null>(null);
+
+  // Keep refs in sync
+  scenesRef.current = scenes;
+  currentSceneIdRef.current = currentSceneId;
 
   // ── Enumerate cameras ─────────────────────────────────────────────────────
   const enumerateCameras = useCallback(async () => {
@@ -186,36 +275,85 @@ export function useStudioEngine() {
         micSourceRef.current.connect(micGainRef.current);
         micSourceRef.current.connect(analyserRef.current);
       }
-      const micTrack = audioTracks.find(t => t.id === 'mic');
-      const vidTrack = audioTracks.find(t => t.id === 'vid-audio');
-      if (micGainRef.current && micTrack) micGainRef.current.gain.value = micTrack.muted ? 0 : micTrack.volume / 100;
-      if (vidGainRef.current && vidTrack) vidGainRef.current.gain.value = vidTrack.muted ? 0 : vidTrack.volume / 100;
     } catch (err) { console.error('Audio init:', err); }
+  }, []);
+
+  // Apply audio track volumes
+  const syncAudioGains = useCallback(() => {
+    const micTrack = audioTracks.find(t => t.id === 'mic');
+    const vidTrack = audioTracks.find(t => t.id === 'vid-audio');
+    if (micGainRef.current && micTrack) micGainRef.current.gain.value = micTrack.muted ? 0 : micTrack.volume / 100;
+    if (vidGainRef.current && vidTrack) vidGainRef.current.gain.value = vidTrack.muted ? 0 : vidTrack.volume / 100;
   }, [audioTracks]);
+
+  useEffect(() => { syncAudioGains(); }, [syncAudioGains]);
 
   // ── Start camera ──────────────────────────────────────────────────────────
   const startCamera = useCallback(async (deviceId?: string, facing?: 'user' | 'environment') => {
     try {
       if (cameraStream) cameraStream.getTracks().forEach(t => t.stop());
       const fm = facing ?? facingMode;
+      // Request highest quality constraints
+      const videoConstraints: MediaTrackConstraints = deviceId
+        ? {
+            deviceId: { exact: deviceId },
+            width: { ideal: 3840, min: 1280 },
+            height: { ideal: 2160, min: 720 },
+            frameRate: { ideal: 60, min: 24 },
+          }
+        : {
+            facingMode: fm,
+            width: { ideal: 3840, min: 1280 },
+            height: { ideal: 2160, min: 720 },
+            frameRate: { ideal: 60, min: 24 },
+          };
+
       const constraints: MediaStreamConstraints = {
-        video: deviceId
-          ? { deviceId: { exact: deviceId }, width: { ideal: CANVAS_W }, height: { ideal: CANVAS_H } }
-          : { facingMode: fm, width: { ideal: CANVAS_W }, height: { ideal: CANVAS_H } },
-        audio: true,
+        video: videoConstraints,
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          sampleRate: 48000,
+          channelCount: 2,
+        },
       };
+
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       setCameraStream(stream);
-      if (videoElemRef.current) { videoElemRef.current.srcObject = stream; videoElemRef.current.play().catch(() => {}); }
+      setFacingMode(fm);
+
+      if (videoElemRef.current) {
+        videoElemRef.current.srcObject = stream;
+        videoElemRef.current.play().catch(() => {});
+      }
       await initAudio(stream);
       await enumerateCameras();
-      toast.success(`Camera started (${fm === 'environment' ? 'Rear' : 'Front'})`);
+
+      // Log camera resolution
+      const track = stream.getVideoTracks()[0];
+      const settings = track.getSettings();
+      console.log(`Camera: ${settings.width}x${settings.height} @ ${settings.frameRate}fps`);
+      toast.success(`Camera: ${settings.width}x${settings.height} (${fm === 'environment' ? 'Rear' : 'Front'})`);
       return stream;
     } catch (err) {
       console.error('Camera error:', err);
-      toast.error('Camera access denied');
-      setError('Camera permission denied');
-      return null;
+      // Fall back to lower quality if 4K not supported
+      try {
+        const fallback = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: facing ?? facingMode, width: { ideal: 1920 }, height: { ideal: 1080 } },
+          audio: { echoCancellation: true, noiseSuppression: true },
+        });
+        setCameraStream(fallback);
+        if (videoElemRef.current) { videoElemRef.current.srcObject = fallback; videoElemRef.current.play().catch(() => {}); }
+        await initAudio(fallback);
+        toast.success('Camera started (1080p)');
+        return fallback;
+      } catch {
+        toast.error('Camera access denied');
+        setError('Camera permission denied');
+        return null;
+      }
     }
   }, [cameraStream, facingMode, initAudio, enumerateCameras]);
 
@@ -223,17 +361,14 @@ export function useStudioEngine() {
   const flipCamera = useCallback(async () => {
     const newFacing = facingMode === 'user' ? 'environment' : 'user';
     setFacingMode(newFacing);
-    if (cameraStream) {
-      await startCamera(undefined, newFacing);
-    }
+    if (cameraStream) await startCamera(undefined, newFacing);
   }, [facingMode, cameraStream, startCamera]);
 
   // ── Start PiP camera ──────────────────────────────────────────────────────
   const startPip = useCallback(async () => {
     try {
-      const cameras2 = await navigator.mediaDevices.enumerateDevices();
-      const videoDevs = cameras2.filter(d => d.kind === 'videoinput');
-      // Use second camera if available, else use different facing mode
+      const allCams = await navigator.mediaDevices.enumerateDevices();
+      const videoDevs = allCams.filter(d => d.kind === 'videoinput');
       let constraints: MediaStreamConstraints;
       if (videoDevs.length > 1 && cameraStream) {
         const usedId = cameraStream.getVideoTracks()[0]?.getSettings().deviceId;
@@ -247,9 +382,7 @@ export function useStudioEngine() {
       if (pipVideoRef.current) { pipVideoRef.current.srcObject = stream; pipVideoRef.current.play().catch(() => {}); }
       setPip(p => ({ ...p, enabled: true }));
       toast.success('PiP camera started');
-    } catch {
-      toast.error('Could not start PiP camera');
-    }
+    } catch { toast.error('Could not start PiP camera'); }
   }, [cameraStream, facingMode]);
 
   const stopPip = useCallback(() => {
@@ -264,18 +397,39 @@ export function useStudioEngine() {
     if (videoElemRef.current) videoElemRef.current.srcObject = null;
   }, [cameraStream]);
 
+  // ── Guest stream ──────────────────────────────────────────────────────────
+  const handleGuestStream = useCallback((stream: MediaStream | null, _guestId: string) => {
+    setGuestStream(stream);
+    if (guestVideoRef.current) {
+      if (stream) { guestVideoRef.current.srcObject = stream; guestVideoRef.current.play().catch(() => {}); }
+      else guestVideoRef.current.srcObject = null;
+    }
+  }, []);
+
   // ── Scene management ──────────────────────────────────────────────────────
   const switchScene = useCallback((id: string) => {
-    // Start transition
+    const fromId = currentSceneIdRef.current;
+    const fromName = scenesRef.current.find(s => s.id === fromId)?.name ?? '';
+    const toName = scenesRef.current.find(s => s.id === id)?.name ?? id;
+
+    // Track analytics
+    const now = Date.now();
+    analyticsDataRef.current.sceneSwitches.push({ time: now, from: fromId, to: id });
+
+    // Update scene usage
+    if (sceneTimerRef.current) {
+      const elapsed = Math.floor((now - sceneTimerRef.current.start) / 1000);
+      const prevId = sceneTimerRef.current.id;
+      analyticsDataRef.current.sceneUsage[prevId] = (analyticsDataRef.current.sceneUsage[prevId] || 0) + elapsed;
+    }
+    sceneTimerRef.current = { id, start: now };
+
     transitionRef.current = { active: true, alpha: 1, direction: -1 };
     setCurrentSceneId(id);
-    const name = scenes.find(s => s.id === id)?.name ?? id;
-    toast(`▶ ${name}`, { duration: 800 });
-  }, [scenes]);
-
-  const setPreviewScene = useCallback((id: string) => {
-    setPreviewSceneId(id);
+    toast(`▶ ${toName}`, { duration: 800 });
   }, []);
+
+  const setPreviewScene = useCallback((id: string) => setPreviewSceneId(id), []);
 
   const takeToProgram = useCallback(() => {
     setCurrentSceneId(prev => {
@@ -283,7 +437,8 @@ export function useStudioEngine() {
       transitionRef.current = { active: true, alpha: 1, direction: -1 };
       return previewSceneId;
     });
-    toast(`▶ CUT TO PROGRAM`, { duration: 800 });
+    const name = scenesRef.current.find(s => s.id === previewSceneId)?.name ?? '';
+    toast(`▶ CUT: ${name}`, { duration: 800 });
   }, [previewSceneId]);
 
   const addScene = useCallback((scene: Omit<StudioScene, 'id'>) => {
@@ -308,9 +463,17 @@ export function useStudioEngine() {
   const captureSceneThumbnail = useCallback((sceneId: string) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const thumb = canvas.toDataURL('image/jpeg', 0.6);
-    setScenes(prev => prev.map(s => s.id === sceneId ? { ...s, thumbnail: thumb } : s));
-    toast.success('Thumbnail captured');
+    // Use idle callback for performance
+    const capture = () => {
+      const thumb = canvas.toDataURL('image/jpeg', 0.6);
+      setScenes(prev => prev.map(s => s.id === sceneId ? { ...s, thumbnail: thumb } : s));
+      toast.success('Thumbnail captured');
+    };
+    if ('requestIdleCallback' in window) {
+      requestIdleCallback(capture);
+    } else {
+      setTimeout(capture, 0);
+    }
   }, []);
 
   // ── Audio management ──────────────────────────────────────────────────────
@@ -343,6 +506,8 @@ export function useStudioEngine() {
     if (type === 'video' && mediaVideoRef.current) {
       mediaVideoRef.current.src = url;
       mediaVideoRef.current.loop = true;
+      // Preload for fast start
+      mediaVideoRef.current.preload = 'auto';
       mediaVideoRef.current.load();
     }
     if (type === 'image' && mediaImageRef.current) {
@@ -350,18 +515,38 @@ export function useStudioEngine() {
     }
   }, []);
 
-  // ── Canvas render ─────────────────────────────────────────────────────────
-  const drawScene = useCallback((ctx: CanvasRenderingContext2D, sceneId: string) => {
-    const scene = scenes.find(s => s.id === sceneId);
+  // ── Canvas draw ───────────────────────────────────────────────────────────
+  const drawScene = useCallback((ctx: CanvasRenderingContext2D, sceneId: string, applyChroma = false) => {
+    const scene = scenesRef.current.find(s => s.id === sceneId);
     if (!scene) return;
 
     ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
 
     if (scene.sourceType === 'color' || scene.sourceType === 'text') {
       ctx.fillStyle = scene.bgColor || '#0d0d1a';
       ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
     } else if (scene.sourceType === 'camera' && videoElemRef.current && videoElemRef.current.readyState >= 2) {
-      ctx.drawImage(videoElemRef.current, 0, 0, CANVAS_W, CANVAS_H);
+      if (applyChroma && chromaKey.enabled) {
+        // Draw to offscreen canvas first for chroma key
+        if (!offscreenRef.current) {
+          offscreenRef.current = document.createElement('canvas');
+          offscreenRef.current.width = CANVAS_W;
+          offscreenRef.current.height = CANVAS_H;
+        }
+        const off = offscreenRef.current;
+        const offCtx = off.getContext('2d', { willReadFrequently: true });
+        if (offCtx) {
+          offCtx.imageSmoothingEnabled = true;
+          offCtx.imageSmoothingQuality = 'high';
+          offCtx.drawImage(videoElemRef.current, 0, 0, CANVAS_W, CANVAS_H);
+          applyChromaKey(offCtx, CANVAS_W, CANVAS_H, chromaKey.color, chromaKey.tolerance, chromaKey.softness);
+          ctx.drawImage(off, 0, 0);
+        }
+      } else {
+        ctx.drawImage(videoElemRef.current, 0, 0, CANVAS_W, CANVAS_H);
+      }
     } else if (scene.sourceType === 'video' && mediaVideoRef.current && mediaVideoRef.current.readyState >= 2) {
       ctx.fillStyle = '#000';
       ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
@@ -399,32 +584,27 @@ export function useStudioEngine() {
       ctx.textBaseline = 'middle';
       ctx.fillText(ov.text, x, y);
     });
-  }, [scenes]);
+  }, [chromaKey]);
 
   const renderFrame = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { alpha: false });
     if (!ctx) return;
 
     // Handle fade transition
     const tr = transitionRef.current;
     if (tr.active && transition !== 'cut') {
-      tr.alpha += tr.direction * (16 / transitionDuration); // ~60fps
-      if (tr.alpha <= 0) {
-        tr.direction = 1;
-      }
-      if (tr.alpha >= 1) {
-        tr.active = false;
-        tr.alpha = 1;
-      }
+      tr.alpha += tr.direction * (16 / transitionDuration);
+      if (tr.alpha <= 0) tr.direction = 1;
+      if (tr.alpha >= 1) { tr.active = false; tr.alpha = 1; }
       ctx.globalAlpha = Math.max(0, Math.min(1, tr.alpha));
     } else {
       ctx.globalAlpha = 1;
       if (tr.active) tr.active = false;
     }
 
-    drawScene(ctx, currentSceneId);
+    drawScene(ctx, currentSceneId, true);
     ctx.globalAlpha = 1;
 
     // PiP overlay
@@ -437,20 +617,37 @@ export function useStudioEngine() {
       else if (pip.position === 'top-right') { px = CANVAS_W - pipW - pad; py = pad; }
       else if (pip.position === 'bottom-left') { px = pad; py = CANVAS_H - pipH - pad; }
       else { px = CANVAS_W - pipW - pad; py = CANVAS_H - pipH - pad; }
-      // Border
       ctx.strokeStyle = '#ffffff';
       ctx.lineWidth = 3;
       ctx.strokeRect(px - 1, py - 1, pipW + 2, pipH + 2);
       ctx.drawImage(pipVideoRef.current, px, py, pipW, pipH);
     }
 
+    // Guest video overlay (bottom-left if not PiP area)
+    if (guestStream && guestVideoRef.current && guestVideoRef.current.readyState >= 2) {
+      const gw = CANVAS_W * 0.28;
+      const gh = gw * 9 / 16;
+      const gx = 16;
+      const gy = pip.enabled && pip.position === 'bottom-left' ? CANVAS_H - gh * 2 - 32 : CANVAS_H - gh - 16;
+      ctx.strokeStyle = '#3b82f6';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(gx - 1, gy - 1, gw + 2, gh + 2);
+      ctx.drawImage(guestVideoRef.current, gx, gy, gw, gh);
+      ctx.fillStyle = 'rgba(59,130,246,0.8)';
+      ctx.fillRect(gx, gy, 60, 18);
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 11px Inter, sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('GUEST', gx + 6, gy + 9);
+    }
+
     // News ticker
     if (tickerVisible && ticker) {
       const barH = 52;
       const barY = CANVAS_H - barH;
-      ctx.fillStyle = 'rgba(180, 0, 0, 0.94)';
+      ctx.fillStyle = 'rgba(180,0,0,0.94)';
       ctx.fillRect(0, barY, CANVAS_W, barH);
-      // Left badge
       ctx.fillStyle = '#ffcc00';
       ctx.fillRect(0, barY, 160, barH);
       ctx.fillStyle = '#111';
@@ -458,7 +655,6 @@ export function useStudioEngine() {
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText('BREAKING', 80, barY + barH / 2);
-      // Scrolling text
       ctx.fillStyle = '#ffffff';
       ctx.font = 'bold 22px Inter, sans-serif';
       ctx.textAlign = 'left';
@@ -468,16 +664,32 @@ export function useStudioEngine() {
       if (tickerXRef.current < -tw) tickerXRef.current = CANVAS_W - 170;
     }
 
-    rafRef.current = requestAnimationFrame(renderFrame);
-  }, [currentSceneId, pip, ticker, tickerVisible, transition, transitionDuration, drawScene]);
+    // Live captions bar
+    if (captionsEnabled && captionTextRef.current && Date.now() < captionVisibleUntilRef.current) {
+      const capH = 60;
+      const capY = tickerVisible ? CANVAS_H - 52 - capH - 8 : CANVAS_H - capH - 16;
+      ctx.fillStyle = 'rgba(0,0,0,0.75)';
+      const text = captionTextRef.current;
+      ctx.font = 'bold 24px Inter, sans-serif';
+      const tw = ctx.measureText(text).width;
+      const capX = (CANVAS_W - tw - 32) / 2;
+      ctx.fillRect(capX, capY, tw + 32, capH);
+      ctx.fillStyle = '#ffffff';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(text, capX + 16, capY + capH / 2);
+    }
 
-  // Preview canvas render
+    rafRef.current = requestAnimationFrame(renderFrame);
+  }, [currentSceneId, pip, ticker, tickerVisible, captionsEnabled, transition, transitionDuration, drawScene, guestStream]);
+
+  // Preview canvas render — lightweight
   const renderPreview = useCallback(() => {
     const canvas = previewCanvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { alpha: false });
     if (!ctx) return;
-    drawScene(ctx, previewSceneId);
+    drawScene(ctx, previewSceneId, false);
     previewRafRef.current = requestAnimationFrame(renderPreview);
   }, [previewSceneId, drawScene]);
 
@@ -500,6 +712,7 @@ export function useStudioEngine() {
     if (scene.sourceType === 'video' && scene.mediaUrl && mediaVideoRef.current) {
       mediaVideoRef.current.src = scene.mediaUrl;
       mediaVideoRef.current.loop = true;
+      mediaVideoRef.current.preload = 'auto';
       mediaVideoRef.current.play().catch(() => {});
     } else if (mediaVideoRef.current && scene.sourceType !== 'video') {
       mediaVideoRef.current.pause();
@@ -537,6 +750,15 @@ export function useStudioEngine() {
       const score = kbps > 2000 ? 95 : kbps > 1000 ? 75 : kbps > 500 ? 55 : kbps > 0 ? 35 : 0;
       const status = score >= 80 ? 'encoding' : score >= 50 ? 'degraded' : score > 0 ? 'critical' : 'idle';
       setHealth(h => ({ ...h, estimatedBitrate: kbps, encoderStatus: status, score }));
+
+      // Record health history for analytics
+      analyticsDataRef.current.healthHistory.push({ time: now, score, bitrate: kbps });
+      if (kbps > analyticsDataRef.current.peakBitrate) analyticsDataRef.current.peakBitrate = kbps;
+      const hist = analyticsDataRef.current.healthHistory;
+      if (hist.length > 0) {
+        analyticsDataRef.current.avgBitrate = Math.round(hist.reduce((s, h) => s + h.bitrate, 0) / hist.length);
+      }
+      setAnalytics({ ...analyticsDataRef.current });
     }, 1000);
     return () => { if (healthRef.current) clearInterval(healthRef.current); };
   }, [isLive, isRecording]);
@@ -547,44 +769,53 @@ export function useStudioEngine() {
     if (!canvas) { toast.error('Canvas not ready'); return; }
     try {
       await initAudio(cameraStream ?? undefined);
+
+      // Use output resolution for capture
+      const [rw, rh] = RESOLUTION_MAP[output.resolution] || [1280, 720];
+      canvas.width = rw;
+      canvas.height = rh;
+
       const canvasStream = canvas.captureStream(output.fps);
       const tracks = [...canvasStream.getVideoTracks()];
       if (destRef.current) tracks.push(...destRef.current.stream.getAudioTracks());
       const programStream = new MediaStream(tracks);
 
+      // Reset analytics
+      analyticsDataRef.current = { ...DEFAULT_ANALYTICS, sessionStart: Date.now() };
+      sceneTimerRef.current = { id: currentSceneId, start: Date.now() };
+
+      const mimeTypes = [
+        'video/webm;codecs=vp9,opus',
+        'video/webm;codecs=vp8,opus',
+        'video/webm',
+        'video/mp4',
+      ];
+      const mimeType = mimeTypes.find(m => MediaRecorder.isTypeSupported(m)) || 'video/webm';
+
       if (output.mode === 'folder') {
-        // File System Access API
         let dirHandle: FileSystemDirectoryHandle;
         try {
-          dirHandle = await (window as any).showDirectoryPicker({ mode: 'readwrite', startIn: 'videos' });
-        } catch {
-          toast.error('Folder selection cancelled');
-          return;
-        }
+          dirHandle = await (window as unknown as { showDirectoryPicker: (opts: object) => Promise<FileSystemDirectoryHandle> })
+            .showDirectoryPicker({ mode: 'readwrite', startIn: 'videos' });
+        } catch { toast.error('Folder selection cancelled'); return; }
+
         const fileName = `recording-${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-')}.webm`;
         const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
         folderWriterRef.current = await fileHandle.createWritable();
-
         chunksRef.current = [];
-        const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus') ? 'video/webm;codecs=vp9,opus' : 'video/webm';
         const recorder = new MediaRecorder(programStream, { mimeType, videoBitsPerSecond: output.bitrate * 1000 });
         recorder.ondataavailable = async (e) => {
           if (e.data.size > 0) {
             chunksRef.current.push(e.data);
             bytesRef.current += e.data.size;
-            if (folderWriterRef.current) {
-              await folderWriterRef.current.write(e.data);
-            }
+            if (folderWriterRef.current) await folderWriterRef.current.write(e.data);
           }
         };
         recorder.onstop = async () => {
-          if (folderWriterRef.current) {
-            await folderWriterRef.current.close();
-            folderWriterRef.current = null;
-          }
-          toast.success(`Saved to folder: ${fileName}`);
+          if (folderWriterRef.current) { await folderWriterRef.current.close(); folderWriterRef.current = null; }
+          toast.success(`Saved: ${fileName}`);
         };
-        recorder.start(1000);
+        recorder.start(500);
         recorderRef.current = recorder;
         setIsRecording(true);
         setDuration(0);
@@ -593,13 +824,12 @@ export function useStudioEngine() {
 
       } else if (output.mode === 'record') {
         chunksRef.current = [];
-        const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus') ? 'video/webm;codecs=vp9,opus' : 'video/webm';
         const recorder = new MediaRecorder(programStream, { mimeType, videoBitsPerSecond: output.bitrate * 1000 });
         recorder.ondataavailable = e => {
           if (e.data.size > 0) { chunksRef.current.push(e.data); bytesRef.current += e.data.size; }
         };
         recorder.onstop = () => {
-          const blob = new Blob(chunksRef.current, { type: 'video/webm' });
+          const blob = new Blob(chunksRef.current, { type: mimeType });
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a');
           a.href = url;
@@ -608,7 +838,7 @@ export function useStudioEngine() {
           URL.revokeObjectURL(url);
           toast.success('Recording downloaded');
         };
-        recorder.start(1000);
+        recorder.start(500);
         recorderRef.current = recorder;
         setIsRecording(true);
         setDuration(0);
@@ -638,19 +868,24 @@ export function useStudioEngine() {
       console.error('Output error:', err);
       toast.error(`Failed: ${(err as Error).message}`);
     }
-  }, [output, cameraStream, initAudio]);
+  }, [output, cameraStream, initAudio, currentSceneId]);
 
   const stopOutput = useCallback(async () => {
     if (recorderRef.current && recorderRef.current.state !== 'inactive') {
       recorderRef.current.stop();
       recorderRef.current = null;
     }
-    if (folderWriterRef.current) {
-      await folderWriterRef.current.close();
-      folderWriterRef.current = null;
-    }
+    if (folderWriterRef.current) { await folderWriterRef.current.close(); folderWriterRef.current = null; }
     if (durationRef.current) clearInterval(durationRef.current);
     if (healthRef.current) clearInterval(healthRef.current);
+
+    // Finalize analytics
+    analyticsDataRef.current.sessionEnd = Date.now();
+    setAnalytics({ ...analyticsDataRef.current });
+
+    // Reset canvas to standard size
+    if (canvasRef.current) { canvasRef.current.width = CANVAS_W; canvasRef.current.height = CANVAS_H; }
+
     setIsRecording(false);
     setIsLive(false);
     setDuration(0);
@@ -658,11 +893,23 @@ export function useStudioEngine() {
     toast('Output stopped');
   }, []);
 
+  // ── Captions ──────────────────────────────────────────────────────────────
+  const updateCaption = useCallback((text: string) => {
+    captionTextRef.current = text;
+    captionVisibleUntilRef.current = Date.now() + 5000; // show for 5s
+    setCaptions(text);
+    analyticsDataRef.current.tickerMessages++;
+  }, []);
+
+  const enableCaptions = useCallback(() => setCaptionsEnabled(true), []);
+  const disableCaptions = useCallback(() => { setCaptionsEnabled(false); captionTextRef.current = ''; }, []);
+
   // ── Ticker ────────────────────────────────────────────────────────────────
   const showTicker = useCallback((text: string) => {
     setTicker(text);
     setTickerVisible(true);
     tickerXRef.current = CANVAS_W;
+    analyticsDataRef.current.tickerMessages++;
   }, []);
 
   const hideTicker = useCallback(() => setTickerVisible(false), []);
@@ -690,9 +937,7 @@ export function useStudioEngine() {
     setRundown(prev => [...prev, { ...seg, id: `rd-${Date.now()}` }]);
   }, []);
 
-  const removeRundownSegment = useCallback((id: string) => {
-    setRundown(prev => prev.filter(s => s.id !== id));
-  }, []);
+  const removeRundownSegment = useCallback((id: string) => setRundown(prev => prev.filter(s => s.id !== id)), []);
 
   const updateRundownSegment = useCallback((id: string, patch: Partial<RundownSegment>) => {
     setRundown(prev => prev.map(s => s.id === id ? { ...s, ...patch } : s));
@@ -703,8 +948,11 @@ export function useStudioEngine() {
     setAdSlots(prev => [...prev, { ...ad, id: `ad-${Date.now()}` }]);
   }, []);
 
-  const removeAdSlot = useCallback((id: string) => {
-    setAdSlots(prev => prev.filter(a => a.id !== id));
+  const removeAdSlot = useCallback((id: string) => setAdSlots(prev => prev.filter(a => a.id !== id)), []);
+
+  // ── Chroma key ────────────────────────────────────────────────────────────
+  const updateChromaKey = useCallback((patch: Partial<ChromaKeySettings>) => {
+    setChromaKey(prev => ({ ...prev, ...patch }));
   }, []);
 
   // Cleanup
@@ -714,15 +962,16 @@ export function useStudioEngine() {
       if (previewRafRef.current) cancelAnimationFrame(previewRafRef.current);
       if (durationRef.current) clearInterval(durationRef.current);
       if (healthRef.current) clearInterval(healthRef.current);
+      if (analyticsRef.current) clearInterval(analyticsRef.current);
       cameraStream?.getTracks().forEach(t => t.stop());
       pipStream?.getTracks().forEach(t => t.stop());
     };
-  }, [cameraStream, pipStream]); // The eslint-disable was removed and dependencies were explicitly listed.
+  }, [cameraStream, pipStream]);
 
   const state: StudioState = {
     currentSceneId, previewSceneId, scenes, audioTracks, output,
     isLive, isRecording, duration, error, transition, transitionDuration,
-    pip, health,
+    pip, health, chromaKey, captions, captionsEnabled,
   };
 
   return {
@@ -730,17 +979,20 @@ export function useStudioEngine() {
     cameras,
     cameraStream,
     pipStream,
+    guestStream,
     facingMode,
     ticker,
     tickerVisible,
     rundown,
     adSlots,
+    analytics,
     canvasRef,
     previewCanvasRef,
     videoElemRef,
     mediaVideoRef,
     mediaImageRef,
     pipVideoRef,
+    guestVideoRef,
     startCamera,
     stopCamera,
     flipCamera,
@@ -772,5 +1024,10 @@ export function useStudioEngine() {
     updateRundownSegment,
     addAdSlot,
     removeAdSlot,
+    updateChromaKey,
+    handleGuestStream,
+    updateCaption,
+    enableCaptions,
+    disableCaptions,
   };
 }

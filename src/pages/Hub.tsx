@@ -1,5 +1,8 @@
 import { Link } from 'react-router-dom';
-import { Radio, Wifi, Smartphone, Monitor, ArrowRight, CheckCircle2, Tv, Layers, Clock, FlipHorizontal, FolderOpen, Activity } from 'lucide-react';
+import {
+  Radio, Wifi, Smartphone, Monitor, ArrowRight, CheckCircle2, Tv, Layers,
+  Clock, FlipHorizontal, FolderOpen, Activity, Scissors, Captions, Users, BarChart2
+} from 'lucide-react';
 import heroBg from '@/assets/hero-bg.jpg';
 
 const STUDIO_FEATURES = [
@@ -7,12 +10,16 @@ const STUDIO_FEATURES = [
   'Preview + Program dual bus',
   'Picture-in-picture overlay',
   'Scene thumbnail capture',
-  'Direct folder recording',
+  'Direct folder recording (4K)',
   'Stream health monitor',
   'Show rundown with timers',
   'Ad / sponsor manager',
   'Cut / Fade / Dissolve transitions',
   'Tally light system',
+  'Chroma key (green screen)',
+  'Live speech-to-text captions',
+  'WebRTC guest video calls',
+  'Stream analytics + CSV export',
   'News ticker & text overlays',
   'Go live via WHIP (WebRTC)',
 ];
@@ -46,14 +53,18 @@ export default function Hub() {
           </p>
 
           {/* Feature pills */}
-          <div className="flex flex-wrap justify-center gap-2 mt-5 max-w-md">
+          <div className="flex flex-wrap justify-center gap-2 mt-5 max-w-lg">
             {[
-              { icon: Layers, label: 'PGM/PVW Bus' },
+              { icon: Layers,         label: 'PGM/PVW Bus' },
               { icon: FlipHorizontal, label: 'Camera Flip' },
-              { icon: FolderOpen, label: 'Folder Save' },
-              { icon: Activity, label: 'Health Monitor' },
-              { icon: Clock, label: 'Rundown Clock' },
-              { icon: Tv, label: 'Ad Manager' },
+              { icon: FolderOpen,     label: '4K Folder Save' },
+              { icon: Activity,       label: 'Health Monitor' },
+              { icon: Clock,          label: 'Rundown Clock' },
+              { icon: Tv,             label: 'Ad Manager' },
+              { icon: Scissors,       label: 'Chroma Key' },
+              { icon: Captions,       label: 'Live Captions' },
+              { icon: Users,          label: 'Guest Calls' },
+              { icon: BarChart2,      label: 'Analytics' },
             ].map(f => (
               <div key={f.label} className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-secondary/40 border border-border">
                 <f.icon size={10} className="text-muted-foreground" />
@@ -67,13 +78,13 @@ export default function Hub() {
       {/* Cards */}
       <div className="flex-1 flex flex-col items-center px-4 pb-10 gap-4 max-w-3xl mx-auto w-full">
 
-        {/* Mobile Studio card */}
+        {/* Mobile Studio */}
         <Link
           to="/studio"
           className="w-full group relative p-5 rounded-2xl border-2 border-emerald-500/40 bg-emerald-500/5 hover:bg-emerald-500/10 hover:border-emerald-500/70 transition-all duration-200 hover:shadow-[0_0_30px_rgba(16,185,129,0.2)] active:scale-[0.99]"
         >
           <div className="flex items-start gap-4">
-            <div className="w-13 h-13 rounded-2xl bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center shrink-0 p-3">
+            <div className="w-12 h-12 rounded-2xl bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center shrink-0">
               <Smartphone size={22} className="text-emerald-400" />
             </div>
             <div className="flex-1 min-w-0">
@@ -83,7 +94,7 @@ export default function Hub() {
                 <span className="px-2 py-0.5 rounded-full bg-primary/20 border border-primary/30 font-mono-console text-[8px] text-primary uppercase tracking-wider">Pro TV</span>
               </div>
               <p className="font-mono-console text-[10px] text-muted-foreground leading-relaxed mb-3">
-                Full TV control room in your browser — camera, audio, scene switching, ads, rundown, transitions, PiP, and live streaming.
+                Full TV control room in your browser — camera, audio, chroma key, live captions, guest calls, analytics, ads, and live streaming.
               </p>
               <div className="grid grid-cols-2 gap-1">
                 {STUDIO_FEATURES.map(f => (
@@ -98,13 +109,13 @@ export default function Hub() {
           </div>
         </Link>
 
-        {/* OBS Controller card */}
+        {/* OBS Controller */}
         <Link
           to="/obs"
           className="w-full group relative p-5 rounded-2xl border-2 border-border bg-secondary/10 hover:bg-secondary/20 hover:border-primary/40 transition-all duration-200 active:scale-[0.99]"
         >
           <div className="flex items-start gap-4">
-            <div className="w-13 h-13 rounded-2xl bg-secondary/40 border border-border flex items-center justify-center shrink-0 p-3">
+            <div className="w-12 h-12 rounded-2xl bg-secondary/40 border border-border flex items-center justify-center shrink-0">
               <Monitor size={22} className="text-muted-foreground" />
             </div>
             <div className="flex-1 min-w-0">
@@ -133,12 +144,15 @@ export default function Hub() {
           <p className="font-mono-console text-[8px] text-muted-foreground/40 uppercase tracking-wider mb-2.5">Mobile Studio Technology</p>
           <div className="flex flex-wrap gap-2">
             {[
-              { label: 'getUserMedia', desc: 'Camera + Mic' },
+              { label: 'getUserMedia', desc: '4K Camera + Mic' },
               { label: 'Canvas API', desc: 'Scene compositor' },
               { label: 'Web Audio API', desc: 'Audio mixer' },
-              { label: 'MediaRecorder', desc: 'Encoder' },
+              { label: 'MediaRecorder', desc: '4K encoder' },
               { label: 'File System API', desc: 'Folder save' },
               { label: 'WHIP/WebRTC', desc: 'Live stream' },
+              { label: 'SpeechRecognition', desc: 'Live captions' },
+              { label: 'BroadcastChannel', desc: 'Guest signaling' },
+              { label: 'ImageData API', desc: 'Chroma key' },
             ].map(item => (
               <div key={item.label} className="px-2.5 py-1.5 rounded-lg bg-secondary border border-border">
                 <p className="font-mono-console text-[9px] text-foreground">{item.label}</p>

@@ -1,6 +1,4 @@
-import { useRef, useEffect } from 'react';
 import { StudioState } from '@/types/studio';
-import { Wifi, Circle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface ProgramMonitorProps {
@@ -11,9 +9,9 @@ interface ProgramMonitorProps {
   mediaVideoRef: React.RefObject<HTMLVideoElement>;
   mediaImageRef: React.RefObject<HTMLImageElement>;
   pipVideoRef: React.RefObject<HTMLVideoElement>;
+  guestVideoRef?: React.RefObject<HTMLVideoElement>;
   duration: number;
   onTakeToProgram?: () => void;
-  onPreviewScene?: (id: string) => void;
 }
 
 function formatDur(s: number) {
@@ -24,10 +22,10 @@ function formatDur(s: number) {
 }
 
 export default function ProgramMonitor({
-  state, canvasRef, previewCanvasRef, videoElemRef, mediaVideoRef, mediaImageRef, pipVideoRef,
-  duration, onTakeToProgram
+  state, canvasRef, previewCanvasRef, videoElemRef, mediaVideoRef, mediaImageRef,
+  pipVideoRef, guestVideoRef, duration, onTakeToProgram
 }: ProgramMonitorProps) {
-  const { isLive, isRecording, currentSceneId, previewSceneId, scenes } = state;
+  const { isLive, isRecording, currentSceneId, previewSceneId, scenes, captionsEnabled, chromaKey } = state;
   const currentScene = scenes.find(s => s.id === currentSceneId);
   const previewScene = scenes.find(s => s.id === previewSceneId);
 
@@ -35,9 +33,10 @@ export default function ProgramMonitor({
     <div className="space-y-2">
       {/* Hidden media elements */}
       <video ref={videoElemRef} className="hidden" playsInline muted autoPlay />
-      <video ref={mediaVideoRef} className="hidden" playsInline muted loop />
+      <video ref={mediaVideoRef} className="hidden" playsInline muted loop preload="auto" />
       <img ref={mediaImageRef} className="hidden" alt="" />
       <video ref={pipVideoRef} className="hidden" playsInline muted autoPlay />
+      {guestVideoRef && <video ref={guestVideoRef} className="hidden" playsInline autoPlay />}
 
       {/* Dual monitor row */}
       <div className="grid grid-cols-2 gap-2">
@@ -45,7 +44,9 @@ export default function ProgramMonitor({
         <div className="flex flex-col gap-1">
           <div className="flex items-center justify-between px-1">
             <span className="font-mono-console text-[9px] uppercase tracking-widest text-emerald-400 font-bold">Preview</span>
-            {previewScene && <span className="font-mono-console text-[9px] text-muted-foreground truncate max-w-[80px]">{previewScene.name}</span>}
+            {previewScene && (
+              <span className="font-mono-console text-[9px] text-muted-foreground truncate max-w-[80px]">{previewScene.name}</span>
+            )}
           </div>
           <div className="relative rounded-xl overflow-hidden border-2 border-emerald-500/60 shadow-[0_0_10px_rgba(16,185,129,0.25)]">
             <canvas
@@ -69,9 +70,11 @@ export default function ProgramMonitor({
           </div>
           <div className={cn(
             'relative rounded-xl overflow-hidden border-2 transition-all duration-300',
-            isLive ? 'border-red-500 shadow-[0_0_16px_rgba(220,38,38,0.5)]' :
-            isRecording ? 'border-amber-500 shadow-[0_0_16px_rgba(245,158,11,0.4)]' :
-            'border-red-500/40'
+            isLive
+              ? 'border-red-500 shadow-[0_0_16px_rgba(220,38,38,0.5)]'
+              : isRecording
+              ? 'border-amber-500 shadow-[0_0_16px_rgba(245,158,11,0.4)]'
+              : 'border-red-500/40'
           )}>
             <canvas
               ref={canvasRef}
@@ -88,11 +91,20 @@ export default function ProgramMonitor({
                 <span className="font-mono-console text-[8px] text-white/70">{currentScene.name}</span>
               </div>
             )}
+            {/* Active feature badges */}
+            <div className="absolute top-1.5 right-1.5 flex flex-col gap-0.5">
+              {chromaKey?.enabled && (
+                <span className="px-1 py-0.5 rounded bg-emerald-600/80 font-mono-console text-[7px] text-white">CK</span>
+              )}
+              {captionsEnabled && (
+                <span className="px-1 py-0.5 rounded bg-blue-600/80 font-mono-console text-[7px] text-white">CC</span>
+              )}
+            </div>
           </div>
         </div>
       </div>
 
-      {/* T-bar / CUT button */}
+      {/* CUT button */}
       {onTakeToProgram && (
         <button
           onClick={onTakeToProgram}
@@ -104,7 +116,10 @@ export default function ProgramMonitor({
 
       {/* Status bar */}
       <div className="flex items-center gap-2 px-1">
-        <div className={cn('w-2 h-2 rounded-full shrink-0', isLive ? 'bg-red-500 animate-pulse' : isRecording ? 'bg-amber-500 animate-pulse' : 'bg-muted-foreground/20')} />
+        <div className={cn(
+          'w-2 h-2 rounded-full shrink-0',
+          isLive ? 'bg-red-500 animate-pulse' : isRecording ? 'bg-amber-500 animate-pulse' : 'bg-muted-foreground/20'
+        )} />
         <span className="font-mono-console text-[9px] text-muted-foreground flex-1">
           {isLive ? 'STREAMING LIVE' : isRecording ? 'RECORDING' : 'PREVIEW MODE'}
         </span>
