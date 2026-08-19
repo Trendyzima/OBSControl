@@ -1,9 +1,9 @@
-
 import { useState, useRef, useCallback, useEffect } from 'react';
 import {
   StudioScene, AudioTrack, StudioState, StreamOutput, OverlayText,
   CameraDevice, TransitionType, PiPSource, StreamHealth, RundownSegment, AdSlot,
-  ChromaKeySettings, BroadcastAnalytics
+  ChromaKeySettings, BroadcastAnalytics, AutoDJState, MediaItem, Playlist, AutoDJMode,
+  SceneHotkey, GuestLayout
 } from '@/types/studio';
 import { toast } from 'sonner';
 
@@ -66,6 +66,13 @@ const DEFAULT_SCENES: StudioScene[] = [
       { id: 'ov14', text: 'Like · Share · Subscribe', x: 50, y: 58, fontSize: 26, color: '#44cc44', bgColor: 'transparent', bold: false, visible: true },
     ]
   },
+  {
+    id: makeId(), name: 'MUSIC', sourceType: 'color', bgColor: '#0a001a', icon: '🎵', category: 'main',
+    overlays: [
+      { id: 'ov15', text: '🎵 NOW PLAYING', x: 50, y: 30, fontSize: 36, color: '#c084fc', bgColor: 'transparent', bold: true, visible: true },
+      { id: 'ov16', text: 'AutoDJ Radio', x: 50, y: 55, fontSize: 48, color: '#ffffff', bgColor: 'transparent', bold: false, visible: true },
+    ]
+  },
 ];
 
 const DEFAULT_AUDIO: AudioTrack[] = [
@@ -86,42 +93,28 @@ const DEFAULT_OUTPUT: StreamOutput = {
   folderHandle: null,
 };
 
-const DEFAULT_PIP: PiPSource = {
-  enabled: false,
-  position: 'bottom-right',
-  size: 25,
-};
-
-const DEFAULT_HEALTH: StreamHealth = {
-  estimatedBitrate: 0,
-  droppedFrames: 0,
-  encoderStatus: 'idle',
-  score: 100,
-  latencyMs: 0,
-  packetsLost: 0,
-};
-
-const DEFAULT_CHROMA: ChromaKeySettings = {
-  enabled: false,
-  color: '#00b140',
-  tolerance: 40,
-  softness: 20,
-};
-
+const DEFAULT_PIP: PiPSource = { enabled: false, position: 'bottom-right', size: 25 };
+const DEFAULT_HEALTH: StreamHealth = { estimatedBitrate: 0, droppedFrames: 0, encoderStatus: 'idle', score: 100, latencyMs: 0, packetsLost: 0 };
+const DEFAULT_CHROMA: ChromaKeySettings = { enabled: false, color: '#00b140', tolerance: 40, softness: 20 };
 const DEFAULT_ANALYTICS: BroadcastAnalytics = {
-  sessionStart: Date.now(),
-  sessionEnd: null,
-  totalDuration: 0,
-  sceneSwitches: [],
-  healthHistory: [],
-  peakBitrate: 0,
-  avgBitrate: 0,
-  adBreaks: 0,
-  tickerMessages: 0,
-  sceneUsage: {},
+  sessionStart: Date.now(), sessionEnd: null, totalDuration: 0, sceneSwitches: [],
+  healthHistory: [], peakBitrate: 0, avgBitrate: 0, adBreaks: 0, tickerMessages: 0, sceneUsage: {},
+};
+const DEFAULT_AUTODJ: AutoDJState = {
+  enabled: false,
+  status: 'idle',
+  mode: 'automatic',
+  currentPlaylistId: null,
+  currentIndex: 0,
+  currentItem: null,
+  nextItem: null,
+  crossfadeDuration: 3,
+  songsUntilAd: 5,
+  adInterval: 5,
+  autoSwitchToLive: true,
+  graceBeforeReturn: 10,
 };
 
-// Resolution map
 const RESOLUTION_MAP: Record<string, [number, number]> = {
   '3840x2160': [3840, 2160],
   '1920x1080': [1920, 1080],
@@ -132,7 +125,6 @@ const RESOLUTION_MAP: Record<string, [number, number]> = {
 const CANVAS_W = 1280;
 const CANVAS_H = 720;
 
-// ─── Hex to RGB helper ────────────────────────────────────────────────────────
 function hexToRgb(hex: string): [number, number, number] {
   const r = parseInt(hex.slice(1, 3), 16);
   const g = parseInt(hex.slice(3, 5), 16);
@@ -140,35 +132,18 @@ function hexToRgb(hex: string): [number, number, number] {
   return [r, g, b];
 }
 
-// ─── Apply chroma key to canvas context ──────────────────────────────────────
-function applyChromaKey(
-  ctx: CanvasRenderingContext2D,
-  w: number, h: number,
-  color: string,
-  tolerance: number,
-  softness: number
-) {
+function applyChromaKey(ctx: CanvasRenderingContext2D, w: number, h: number, color: string, tolerance: number, softness: number) {
   const [kr, kg, kb] = hexToRgb(color);
-  const tol = tolerance * 2.55; // 0-255 range
+  const tol = tolerance * 2.55;
   const soft = Math.max(1, softness * 0.5);
-
   const imageData = ctx.getImageData(0, 0, w, h);
   const data = imageData.data;
-
   for (let i = 0; i < data.length; i += 4) {
     const r = data[i], g = data[i + 1], b = data[i + 2];
     const dist = Math.sqrt((r - kr) ** 2 + (g - kg) ** 2 + (b - kb) ** 2);
-
-    if (dist < tol) {
-      // Full removal within tolerance
-      data[i + 3] = 0;
-    } else if (dist < tol + soft) {
-      // Soft edge feathering
-      const alpha = ((dist - tol) / soft) * 255;
-      data[i + 3] = Math.round(alpha);
-    }
+    if (dist < tol) { data[i + 3] = 0; }
+    else if (dist < tol + soft) { data[i + 3] = Math.round(((dist - tol) / soft) * 255); }
   }
-
   ctx.putImageData(imageData, 0, 0);
 }
 
@@ -197,27 +172,36 @@ export function useStudioEngine() {
   const [health, setHealth] = useState<StreamHealth>(DEFAULT_HEALTH);
   const [chromaKey, setChromaKey] = useState<ChromaKeySettings>(DEFAULT_CHROMA);
   const [analytics, setAnalytics] = useState<BroadcastAnalytics>({ ...DEFAULT_ANALYTICS, sessionStart: Date.now() });
-
-  // Rundown & ads
   const [rundown, setRundown] = useState<RundownSegment[]>([]);
   const [adSlots, setAdSlots] = useState<AdSlot[]>([]);
+
+  // AutoDJ state
+  const [autoDJ, setAutoDJ] = useState<AutoDJState>({ ...DEFAULT_AUTODJ });
+  const [playlists, setPlaylists] = useState<Playlist[]>([]);
+  const [hotkeys, setHotkeys] = useState<SceneHotkey[]>([]);
+  const [guestLayout, setGuestLayout] = useState<GuestLayout>('duo');
+  const [listenerCount, setListenerCount] = useState(0);
+  const [stationName, setStationName] = useState('My Radio Station');
 
   // Refs
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const offscreenRef = useRef<HTMLCanvasElement | null>(null); // for chroma key
+  const offscreenRef = useRef<HTMLCanvasElement | null>(null);
   const videoElemRef = useRef<HTMLVideoElement | null>(null);
   const mediaVideoRef = useRef<HTMLVideoElement | null>(null);
   const mediaImageRef = useRef<HTMLImageElement | null>(null);
   const pipVideoRef = useRef<HTMLVideoElement | null>(null);
   const guestVideoRef = useRef<HTMLVideoElement | null>(null);
+  const autoDJAudioRef = useRef<HTMLAudioElement | null>(null);
 
   const audioCtxRef = useRef<AudioContext | null>(null);
   const micGainRef = useRef<GainNode | null>(null);
   const vidGainRef = useRef<GainNode | null>(null);
+  const musicGainRef = useRef<GainNode | null>(null);
   const destRef = useRef<MediaStreamAudioDestinationNode | null>(null);
   const micSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
+  const autoDJSourceRef = useRef<MediaElementAudioSourceNode | null>(null);
 
   const rafRef = useRef<number | null>(null);
   const previewRafRef = useRef<number | null>(null);
@@ -225,9 +209,7 @@ export function useStudioEngine() {
   const chunksRef = useRef<Blob[]>([]);
   const durationRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const healthRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const analyticsRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const tickerXRef = useRef(CANVAS_W);
-  const captionXRef = useRef(0);
   const captionTextRef = useRef('');
   const captionVisibleUntilRef = useRef(0);
   const bytesRef = useRef(0);
@@ -238,10 +220,14 @@ export function useStudioEngine() {
   const currentSceneIdRef = useRef(currentSceneId);
   const analyticsDataRef = useRef<BroadcastAnalytics>({ ...DEFAULT_ANALYTICS, sessionStart: Date.now() });
   const sceneTimerRef = useRef<{ id: string; start: number } | null>(null);
+  const autoDJRef = useRef<AutoDJState>(autoDJ);
+  const playlistsRef = useRef<Playlist[]>(playlists);
+  const autoDJTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Keep refs in sync
   scenesRef.current = scenes;
   currentSceneIdRef.current = currentSceneId;
+  autoDJRef.current = autoDJ;
+  playlistsRef.current = playlists;
 
   // ── Enumerate cameras ─────────────────────────────────────────────────────
   const enumerateCameras = useCallback(async () => {
@@ -252,9 +238,7 @@ export function useStudioEngine() {
         label: d.label || `Camera ${d.deviceId.slice(0, 6)}`,
       }));
       setCameras(videoDevices);
-    } catch {
-      console.log('Could not enumerate cameras');
-    }
+    } catch { console.log('Could not enumerate cameras'); }
   }, []);
 
   useEffect(() => { enumerateCameras(); }, [enumerateCameras]);
@@ -268,7 +252,8 @@ export function useStudioEngine() {
       if (!destRef.current) destRef.current = ctx.createMediaStreamDestination();
       if (!micGainRef.current) { micGainRef.current = ctx.createGain(); micGainRef.current.connect(destRef.current); }
       if (!vidGainRef.current) { vidGainRef.current = ctx.createGain(); vidGainRef.current.connect(destRef.current); }
-      if (!analyserRef.current) { analyserRef.current = ctx.createAnalyser(); analyserRef.current.fftSize = 256; }
+      if (!musicGainRef.current) { musicGainRef.current = ctx.createGain(); musicGainRef.current.gain.value = 0.3; musicGainRef.current.connect(destRef.current); }
+      if (!analyserRef.current) { analyserRef.current = ctx.createAnalyser(); analyserRef.current.fftSize = 2048; }
       if (stream) {
         if (micSourceRef.current) micSourceRef.current.disconnect();
         micSourceRef.current = ctx.createMediaStreamSource(stream);
@@ -278,12 +263,13 @@ export function useStudioEngine() {
     } catch (err) { console.error('Audio init:', err); }
   }, []);
 
-  // Apply audio track volumes
   const syncAudioGains = useCallback(() => {
     const micTrack = audioTracks.find(t => t.id === 'mic');
     const vidTrack = audioTracks.find(t => t.id === 'vid-audio');
+    const musicTrack = audioTracks.find(t => t.id === 'music');
     if (micGainRef.current && micTrack) micGainRef.current.gain.value = micTrack.muted ? 0 : micTrack.volume / 100;
     if (vidGainRef.current && vidTrack) vidGainRef.current.gain.value = vidTrack.muted ? 0 : vidTrack.volume / 100;
+    if (musicGainRef.current && musicTrack) musicGainRef.current.gain.value = musicTrack.muted ? 0 : musicTrack.volume / 100;
   }, [audioTracks]);
 
   useEffect(() => { syncAudioGains(); }, [syncAudioGains]);
@@ -293,52 +279,24 @@ export function useStudioEngine() {
     try {
       if (cameraStream) cameraStream.getTracks().forEach(t => t.stop());
       const fm = facing ?? facingMode;
-      // Request highest quality constraints
       const videoConstraints: MediaTrackConstraints = deviceId
-        ? {
-            deviceId: { exact: deviceId },
-            width: { ideal: 3840, min: 1280 },
-            height: { ideal: 2160, min: 720 },
-            frameRate: { ideal: 60, min: 24 },
-          }
-        : {
-            facingMode: fm,
-            width: { ideal: 3840, min: 1280 },
-            height: { ideal: 2160, min: 720 },
-            frameRate: { ideal: 60, min: 24 },
-          };
+        ? { deviceId: { exact: deviceId }, width: { ideal: 3840, min: 1280 }, height: { ideal: 2160, min: 720 }, frameRate: { ideal: 60, min: 24 } }
+        : { facingMode: fm, width: { ideal: 3840, min: 1280 }, height: { ideal: 2160, min: 720 }, frameRate: { ideal: 60, min: 24 } };
 
-      const constraints: MediaStreamConstraints = {
+      const stream = await navigator.mediaDevices.getUserMedia({
         video: videoConstraints,
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          sampleRate: 48000,
-          channelCount: 2,
-        },
-      };
-
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, sampleRate: 48000, channelCount: 2 },
+      });
       setCameraStream(stream);
       setFacingMode(fm);
-
-      if (videoElemRef.current) {
-        videoElemRef.current.srcObject = stream;
-        videoElemRef.current.play().catch(() => {});
-      }
+      if (videoElemRef.current) { videoElemRef.current.srcObject = stream; videoElemRef.current.play().catch(() => {}); }
       await initAudio(stream);
       await enumerateCameras();
-
-      // Log camera resolution
       const track = stream.getVideoTracks()[0];
       const settings = track.getSettings();
-      console.log(`Camera: ${settings.width}x${settings.height} @ ${settings.frameRate}fps`);
       toast.success(`Camera: ${settings.width}x${settings.height} (${fm === 'environment' ? 'Rear' : 'Front'})`);
       return stream;
-    } catch (err) {
-      console.error('Camera error:', err);
-      // Fall back to lower quality if 4K not supported
+    } catch {
       try {
         const fallback = await navigator.mediaDevices.getUserMedia({
           video: { facingMode: facing ?? facingMode, width: { ideal: 1920 }, height: { ideal: 1080 } },
@@ -357,14 +315,12 @@ export function useStudioEngine() {
     }
   }, [cameraStream, facingMode, initAudio, enumerateCameras]);
 
-  // ── Flip camera ───────────────────────────────────────────────────────────
   const flipCamera = useCallback(async () => {
     const newFacing = facingMode === 'user' ? 'environment' : 'user';
     setFacingMode(newFacing);
     if (cameraStream) await startCamera(undefined, newFacing);
   }, [facingMode, cameraStream, startCamera]);
 
-  // ── Start PiP camera ──────────────────────────────────────────────────────
   const startPip = useCallback(async () => {
     try {
       const allCams = await navigator.mediaDevices.enumerateDevices();
@@ -397,7 +353,6 @@ export function useStudioEngine() {
     if (videoElemRef.current) videoElemRef.current.srcObject = null;
   }, [cameraStream]);
 
-  // ── Guest stream ──────────────────────────────────────────────────────────
   const handleGuestStream = useCallback((stream: MediaStream | null, _guestId: string) => {
     setGuestStream(stream);
     if (guestVideoRef.current) {
@@ -406,24 +361,157 @@ export function useStudioEngine() {
     }
   }, []);
 
+  // ── AutoDJ engine ─────────────────────────────────────────────────────────
+  const autoDJPlayNext = useCallback(() => {
+    const dj = autoDJRef.current;
+    const pls = playlistsRef.current;
+    if (!dj.currentPlaylistId) return;
+    const pl = pls.find(p => p.id === dj.currentPlaylistId);
+    if (!pl || pl.items.length === 0) return;
+
+    let nextIndex = dj.currentIndex;
+
+    // Check if we should play an ad
+    const adItems = pl.items.filter(i => i.type === 'ad');
+    if (dj.songsUntilAd <= 0 && adItems.length > 0) {
+      const ad = adItems[Math.floor(Math.random() * adItems.length)];
+      const afterAdIndex = nextIndex;
+      setAutoDJ(prev => ({ ...prev, currentItem: ad, nextItem: pl.items[afterAdIndex] || null, songsUntilAd: prev.adInterval, status: 'playing' }));
+      if (autoDJAudioRef.current) {
+        autoDJAudioRef.current.src = ad.url;
+        autoDJAudioRef.current.play().catch(() => {});
+        autoDJAudioRef.current.onended = () => autoDJPlayNext();
+      }
+      return;
+    }
+
+    // Play next music track
+    if (pl.mode === 'shuffle') {
+      nextIndex = Math.floor(Math.random() * pl.items.filter(i => i.type !== 'ad').length);
+    } else {
+      const musicItems = pl.items.filter(i => i.type !== 'ad');
+      nextIndex = nextIndex % musicItems.length;
+    }
+
+    const musicItems = pl.items.filter(i => i.type !== 'ad');
+    if (musicItems.length === 0) return;
+
+    const item = musicItems[nextIndex % musicItems.length];
+    const nextItem = musicItems[(nextIndex + 1) % musicItems.length] || null;
+
+    setAutoDJ(prev => ({
+      ...prev,
+      currentItem: item,
+      nextItem,
+      currentIndex: nextIndex + 1,
+      songsUntilAd: prev.songsUntilAd - 1,
+      status: 'playing',
+    }));
+
+    if (autoDJAudioRef.current) {
+      autoDJAudioRef.current.src = item.url;
+      autoDJAudioRef.current.play().catch(() => {});
+      autoDJAudioRef.current.onended = () => {
+        if (autoDJRef.current.mode === 'automatic' && autoDJRef.current.status === 'playing') {
+          autoDJPlayNext();
+        }
+      };
+    }
+  }, []);
+
+  const autoDJPlay = useCallback(() => {
+    if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
+    const ctx = audioCtxRef.current;
+
+    if (!autoDJAudioRef.current) {
+      autoDJAudioRef.current = new Audio();
+      autoDJAudioRef.current.crossOrigin = 'anonymous';
+    }
+
+    // Connect to audio graph if not already
+    if (ctx.state === 'suspended') ctx.resume();
+    if (!destRef.current) destRef.current = ctx.createMediaStreamDestination();
+    if (!musicGainRef.current) { musicGainRef.current = ctx.createGain(); musicGainRef.current.connect(destRef.current); }
+
+    if (!autoDJSourceRef.current && autoDJAudioRef.current) {
+      try {
+        autoDJSourceRef.current = ctx.createMediaElementSource(autoDJAudioRef.current);
+        autoDJSourceRef.current.connect(musicGainRef.current);
+      } catch { /* already connected */ }
+    }
+
+    setAutoDJ(prev => ({ ...prev, enabled: true, status: 'playing' }));
+    autoDJPlayNext();
+    toast.success('AutoDJ started');
+  }, [autoDJPlayNext]);
+
+  const autoDJPause = useCallback(() => {
+    if (autoDJAudioRef.current) autoDJAudioRef.current.pause();
+    setAutoDJ(prev => ({ ...prev, status: 'paused' }));
+  }, []);
+
+  const autoDJSkip = useCallback(() => {
+    if (autoDJAudioRef.current) { autoDJAudioRef.current.pause(); autoDJAudioRef.current.onended = null; }
+    autoDJPlayNext();
+  }, [autoDJPlayNext]);
+
+  const autoDJSetMode = useCallback((mode: AutoDJMode) => {
+    setAutoDJ(prev => ({ ...prev, mode }));
+  }, []);
+
+  const autoDJSetPlaylist = useCallback((id: string) => {
+    setAutoDJ(prev => ({ ...prev, currentPlaylistId: id, currentIndex: 0 }));
+  }, []);
+
+  const autoDJSetCrossfade = useCallback((secs: number) => {
+    setAutoDJ(prev => ({ ...prev, crossfadeDuration: secs }));
+  }, []);
+
+  const autoDJSetAdInterval = useCallback((n: number) => {
+    setAutoDJ(prev => ({ ...prev, adInterval: n, songsUntilAd: n }));
+  }, []);
+
+  const autoDJToggleAutoSwitch = useCallback(() => {
+    setAutoDJ(prev => ({ ...prev, autoSwitchToLive: !prev.autoSwitchToLive }));
+  }, []);
+
+  // Playlist management
+  const addPlaylist = useCallback((pl: Omit<Playlist, 'id'>) => {
+    const newPl: Playlist = { ...pl, id: `pl-${Date.now()}` };
+    setPlaylists(prev => [...prev, newPl]);
+    return newPl.id;
+  }, []);
+
+  const removePlaylist = useCallback((id: string) => {
+    setPlaylists(prev => prev.filter(p => p.id !== id));
+    setAutoDJ(prev => prev.currentPlaylistId === id ? { ...prev, currentPlaylistId: null, currentItem: null } : prev);
+  }, []);
+
+  const addMediaToPlaylist = useCallback((playlistId: string, item: Omit<MediaItem, 'id'>) => {
+    const newItem: MediaItem = { ...item, id: `mi-${Date.now()}-${Math.random().toString(36).slice(2, 6)}` };
+    setPlaylists(prev => prev.map(p =>
+      p.id === playlistId ? { ...p, items: [...p.items, newItem] } : p
+    ));
+  }, []);
+
+  const removeMediaFromPlaylist = useCallback((playlistId: string, itemId: string) => {
+    setPlaylists(prev => prev.map(p =>
+      p.id === playlistId ? { ...p, items: p.items.filter(i => i.id !== itemId) } : p
+    ));
+  }, []);
+
   // ── Scene management ──────────────────────────────────────────────────────
   const switchScene = useCallback((id: string) => {
     const fromId = currentSceneIdRef.current;
-    const fromName = scenesRef.current.find(s => s.id === fromId)?.name ?? '';
     const toName = scenesRef.current.find(s => s.id === id)?.name ?? id;
-
-    // Track analytics
     const now = Date.now();
     analyticsDataRef.current.sceneSwitches.push({ time: now, from: fromId, to: id });
-
-    // Update scene usage
     if (sceneTimerRef.current) {
       const elapsed = Math.floor((now - sceneTimerRef.current.start) / 1000);
       const prevId = sceneTimerRef.current.id;
       analyticsDataRef.current.sceneUsage[prevId] = (analyticsDataRef.current.sceneUsage[prevId] || 0) + elapsed;
     }
     sceneTimerRef.current = { id, start: now };
-
     transitionRef.current = { active: true, alpha: 1, direction: -1 };
     setCurrentSceneId(id);
     toast(`▶ ${toName}`, { duration: 800 });
@@ -459,21 +547,16 @@ export function useStudioEngine() {
     });
   }, []);
 
-  // ── Capture scene thumbnail ───────────────────────────────────────────────
   const captureSceneThumbnail = useCallback((sceneId: string) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    // Use idle callback for performance
     const capture = () => {
       const thumb = canvas.toDataURL('image/jpeg', 0.6);
       setScenes(prev => prev.map(s => s.id === sceneId ? { ...s, thumbnail: thumb } : s));
       toast.success('Thumbnail captured');
     };
-    if ('requestIdleCallback' in window) {
-      requestIdleCallback(capture);
-    } else {
-      setTimeout(capture, 0);
-    }
+    if ('requestIdleCallback' in window) requestIdleCallback(capture);
+    else setTimeout(capture, 0);
   }, []);
 
   // ── Audio management ──────────────────────────────────────────────────────
@@ -482,6 +565,7 @@ export function useStudioEngine() {
       if (t.id !== id) return t;
       if (id === 'mic' && micGainRef.current) micGainRef.current.gain.value = t.muted ? 0 : volume / 100;
       if (id === 'vid-audio' && vidGainRef.current) vidGainRef.current.gain.value = t.muted ? 0 : volume / 100;
+      if (id === 'music' && musicGainRef.current) musicGainRef.current.gain.value = t.muted ? 0 : volume / 100;
       return { ...t, volume };
     }));
   }, []);
@@ -492,6 +576,7 @@ export function useStudioEngine() {
       const muted = !t.muted;
       if (id === 'mic' && micGainRef.current) micGainRef.current.gain.value = muted ? 0 : t.volume / 100;
       if (id === 'vid-audio' && vidGainRef.current) vidGainRef.current.gain.value = muted ? 0 : t.volume / 100;
+      if (id === 'music' && musicGainRef.current) musicGainRef.current.gain.value = muted ? 0 : t.volume / 100;
       return { ...t, muted };
     }));
   }, []);
@@ -506,13 +591,10 @@ export function useStudioEngine() {
     if (type === 'video' && mediaVideoRef.current) {
       mediaVideoRef.current.src = url;
       mediaVideoRef.current.loop = true;
-      // Preload for fast start
       mediaVideoRef.current.preload = 'auto';
       mediaVideoRef.current.load();
     }
-    if (type === 'image' && mediaImageRef.current) {
-      mediaImageRef.current.src = url;
-    }
+    if (type === 'image' && mediaImageRef.current) mediaImageRef.current.src = url;
   }, []);
 
   // ── Canvas draw ───────────────────────────────────────────────────────────
@@ -529,7 +611,6 @@ export function useStudioEngine() {
       ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
     } else if (scene.sourceType === 'camera' && videoElemRef.current && videoElemRef.current.readyState >= 2) {
       if (applyChroma && chromaKey.enabled) {
-        // Draw to offscreen canvas first for chroma key
         if (!offscreenRef.current) {
           offscreenRef.current = document.createElement('canvas');
           offscreenRef.current.width = CANVAS_W;
@@ -584,6 +665,12 @@ export function useStudioEngine() {
       ctx.textBaseline = 'middle';
       ctx.fillText(ov.text, x, y);
     });
+
+    // AutoDJ overlay — show now playing on music scene
+    const djState = autoDJRef.current;
+    if (djState.status === 'playing' && djState.currentItem && (scene.name === 'MUSIC' || scene.category === 'main')) {
+      // small overlay bottom-left
+    }
   }, [chromaKey]);
 
   const renderFrame = useCallback(() => {
@@ -592,7 +679,6 @@ export function useStudioEngine() {
     const ctx = canvas.getContext('2d', { alpha: false });
     if (!ctx) return;
 
-    // Handle fade transition
     const tr = transitionRef.current;
     if (tr.active && transition !== 'cut') {
       tr.alpha += tr.direction * (16 / transitionDuration);
@@ -607,7 +693,7 @@ export function useStudioEngine() {
     drawScene(ctx, currentSceneId, true);
     ctx.globalAlpha = 1;
 
-    // PiP overlay
+    // PiP
     if (pip.enabled && pipVideoRef.current && pipVideoRef.current.readyState >= 2) {
       const pipW = (pip.size / 100) * CANVAS_W;
       const pipH = (pipW * 9) / 16;
@@ -623,7 +709,7 @@ export function useStudioEngine() {
       ctx.drawImage(pipVideoRef.current, px, py, pipW, pipH);
     }
 
-    // Guest video overlay (bottom-left if not PiP area)
+    // Guest overlay
     if (guestStream && guestVideoRef.current && guestVideoRef.current.readyState >= 2) {
       const gw = CANVAS_W * 0.28;
       const gh = gw * 9 / 16;
@@ -642,7 +728,19 @@ export function useStudioEngine() {
       ctx.fillText('GUEST', gx + 6, gy + 9);
     }
 
-    // News ticker
+    // AutoDJ now-playing watermark
+    const dj = autoDJRef.current;
+    if (dj.status === 'playing' && dj.currentItem) {
+      ctx.fillStyle = 'rgba(0,0,0,0.5)';
+      ctx.fillRect(0, 0, 280, 38);
+      ctx.fillStyle = '#c084fc';
+      ctx.font = 'bold 11px Inter, sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('🎵 ' + dj.currentItem.title.slice(0, 28), 8, 19);
+    }
+
+    // Ticker
     if (tickerVisible && ticker) {
       const barH = 52;
       const barY = CANVAS_H - barH;
@@ -664,15 +762,15 @@ export function useStudioEngine() {
       if (tickerXRef.current < -tw) tickerXRef.current = CANVAS_W - 170;
     }
 
-    // Live captions bar
+    // Captions
     if (captionsEnabled && captionTextRef.current && Date.now() < captionVisibleUntilRef.current) {
       const capH = 60;
       const capY = tickerVisible ? CANVAS_H - 52 - capH - 8 : CANVAS_H - capH - 16;
-      ctx.fillStyle = 'rgba(0,0,0,0.75)';
       const text = captionTextRef.current;
       ctx.font = 'bold 24px Inter, sans-serif';
       const tw = ctx.measureText(text).width;
       const capX = (CANVAS_W - tw - 32) / 2;
+      ctx.fillStyle = 'rgba(0,0,0,0.75)';
       ctx.fillRect(capX, capY, tw + 32, capH);
       ctx.fillStyle = '#ffffff';
       ctx.textAlign = 'left';
@@ -683,7 +781,6 @@ export function useStudioEngine() {
     rafRef.current = requestAnimationFrame(renderFrame);
   }, [currentSceneId, pip, ticker, tickerVisible, captionsEnabled, transition, transitionDuration, drawScene, guestStream]);
 
-  // Preview canvas render — lightweight
   const renderPreview = useCallback(() => {
     const canvas = previewCanvasRef.current;
     if (!canvas) return;
@@ -705,7 +802,6 @@ export function useStudioEngine() {
     return () => { if (previewRafRef.current) cancelAnimationFrame(previewRafRef.current); };
   }, [renderPreview]);
 
-  // Video playback on scene switch
   useEffect(() => {
     const scene = scenes.find(s => s.id === currentSceneId);
     if (!scene) return;
@@ -735,12 +831,9 @@ export function useStudioEngine() {
     return () => clearInterval(interval);
   }, [cameraStream]);
 
-  // ── Health monitor ────────────────────────────────────────────────────────
+  // Health monitor
   useEffect(() => {
-    if ((!isLive && !isRecording) || !recorderRef.current) {
-      setHealth(DEFAULT_HEALTH);
-      return;
-    }
+    if (!isLive && !isRecording) { setHealth(DEFAULT_HEALTH); return; }
     healthRef.current = setInterval(() => {
       const now = Date.now();
       const elapsed = (now - lastByteTimeRef.current) / 1000;
@@ -750,46 +843,33 @@ export function useStudioEngine() {
       const score = kbps > 2000 ? 95 : kbps > 1000 ? 75 : kbps > 500 ? 55 : kbps > 0 ? 35 : 0;
       const status = score >= 80 ? 'encoding' : score >= 50 ? 'degraded' : score > 0 ? 'critical' : 'idle';
       setHealth(h => ({ ...h, estimatedBitrate: kbps, encoderStatus: status, score }));
-
-      // Record health history for analytics
       analyticsDataRef.current.healthHistory.push({ time: now, score, bitrate: kbps });
       if (kbps > analyticsDataRef.current.peakBitrate) analyticsDataRef.current.peakBitrate = kbps;
       const hist = analyticsDataRef.current.healthHistory;
-      if (hist.length > 0) {
-        analyticsDataRef.current.avgBitrate = Math.round(hist.reduce((s, h) => s + h.bitrate, 0) / hist.length);
-      }
+      if (hist.length > 0) analyticsDataRef.current.avgBitrate = Math.round(hist.reduce((s, h) => s + h.bitrate, 0) / hist.length);
       setAnalytics({ ...analyticsDataRef.current });
     }, 1000);
     return () => { if (healthRef.current) clearInterval(healthRef.current); };
   }, [isLive, isRecording]);
 
-  // ── Output (Record / Folder / WHIP) ──────────────────────────────────────
+  // ── Output ────────────────────────────────────────────────────────────────
   const startOutput = useCallback(async () => {
     const canvas = canvasRef.current;
     if (!canvas) { toast.error('Canvas not ready'); return; }
     try {
       await initAudio(cameraStream ?? undefined);
-
-      // Use output resolution for capture
       const [rw, rh] = RESOLUTION_MAP[output.resolution] || [1280, 720];
       canvas.width = rw;
       canvas.height = rh;
-
       const canvasStream = canvas.captureStream(output.fps);
       const tracks = [...canvasStream.getVideoTracks()];
       if (destRef.current) tracks.push(...destRef.current.stream.getAudioTracks());
       const programStream = new MediaStream(tracks);
 
-      // Reset analytics
       analyticsDataRef.current = { ...DEFAULT_ANALYTICS, sessionStart: Date.now() };
       sceneTimerRef.current = { id: currentSceneId, start: Date.now() };
 
-      const mimeTypes = [
-        'video/webm;codecs=vp9,opus',
-        'video/webm;codecs=vp8,opus',
-        'video/webm',
-        'video/mp4',
-      ];
+      const mimeTypes = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm', 'video/mp4'];
       const mimeType = mimeTypes.find(m => MediaRecorder.isTypeSupported(m)) || 'video/webm';
 
       if (output.mode === 'folder') {
@@ -798,23 +878,15 @@ export function useStudioEngine() {
           dirHandle = await (window as unknown as { showDirectoryPicker: (opts: object) => Promise<FileSystemDirectoryHandle> })
             .showDirectoryPicker({ mode: 'readwrite', startIn: 'videos' });
         } catch { toast.error('Folder selection cancelled'); return; }
-
         const fileName = `recording-${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-')}.webm`;
         const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
         folderWriterRef.current = await fileHandle.createWritable();
         chunksRef.current = [];
         const recorder = new MediaRecorder(programStream, { mimeType, videoBitsPerSecond: output.bitrate * 1000 });
         recorder.ondataavailable = async (e) => {
-          if (e.data.size > 0) {
-            chunksRef.current.push(e.data);
-            bytesRef.current += e.data.size;
-            if (folderWriterRef.current) await folderWriterRef.current.write(e.data);
-          }
+          if (e.data.size > 0) { chunksRef.current.push(e.data); bytesRef.current += e.data.size; if (folderWriterRef.current) await folderWriterRef.current.write(e.data); }
         };
-        recorder.onstop = async () => {
-          if (folderWriterRef.current) { await folderWriterRef.current.close(); folderWriterRef.current = null; }
-          toast.success(`Saved: ${fileName}`);
-        };
+        recorder.onstop = async () => { if (folderWriterRef.current) { await folderWriterRef.current.close(); folderWriterRef.current = null; } toast.success(`Saved: ${fileName}`); };
         recorder.start(500);
         recorderRef.current = recorder;
         setIsRecording(true);
@@ -825,9 +897,7 @@ export function useStudioEngine() {
       } else if (output.mode === 'record') {
         chunksRef.current = [];
         const recorder = new MediaRecorder(programStream, { mimeType, videoBitsPerSecond: output.bitrate * 1000 });
-        recorder.ondataavailable = e => {
-          if (e.data.size > 0) { chunksRef.current.push(e.data); bytesRef.current += e.data.size; }
-        };
+        recorder.ondataavailable = e => { if (e.data.size > 0) { chunksRef.current.push(e.data); bytesRef.current += e.data.size; } };
         recorder.onstop = () => {
           const blob = new Blob(chunksRef.current, { type: mimeType });
           const url = URL.createObjectURL(blob);
@@ -863,6 +933,28 @@ export function useStudioEngine() {
         setDuration(0);
         durationRef.current = setInterval(() => setDuration(d => d + 1), 1000);
         toast.success('🔴 LIVE via WHIP');
+
+      } else if (output.mode === 'rtmp') {
+        toast('RTMP streaming requires a relay server. Starting local recording as fallback.', { duration: 5000 });
+        // Fall back to record mode for RTMP relay setup
+        chunksRef.current = [];
+        const recorder = new MediaRecorder(programStream, { mimeType, videoBitsPerSecond: output.bitrate * 1000 });
+        recorder.ondataavailable = e => { if (e.data.size > 0) { chunksRef.current.push(e.data); bytesRef.current += e.data.size; } };
+        recorder.onstop = () => {
+          const blob = new Blob(chunksRef.current, { type: mimeType });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `rtmp-broadcast-${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-')}.webm`;
+          a.click();
+          URL.revokeObjectURL(url);
+          toast.success('RTMP session saved');
+        };
+        recorder.start(500);
+        recorderRef.current = recorder;
+        setIsLive(true);
+        setDuration(0);
+        durationRef.current = setInterval(() => setDuration(d => d + 1), 1000);
       }
     } catch (err) {
       console.error('Output error:', err);
@@ -871,21 +963,13 @@ export function useStudioEngine() {
   }, [output, cameraStream, initAudio, currentSceneId]);
 
   const stopOutput = useCallback(async () => {
-    if (recorderRef.current && recorderRef.current.state !== 'inactive') {
-      recorderRef.current.stop();
-      recorderRef.current = null;
-    }
+    if (recorderRef.current && recorderRef.current.state !== 'inactive') { recorderRef.current.stop(); recorderRef.current = null; }
     if (folderWriterRef.current) { await folderWriterRef.current.close(); folderWriterRef.current = null; }
     if (durationRef.current) clearInterval(durationRef.current);
     if (healthRef.current) clearInterval(healthRef.current);
-
-    // Finalize analytics
     analyticsDataRef.current.sessionEnd = Date.now();
     setAnalytics({ ...analyticsDataRef.current });
-
-    // Reset canvas to standard size
     if (canvasRef.current) { canvasRef.current.width = CANVAS_W; canvasRef.current.height = CANVAS_H; }
-
     setIsRecording(false);
     setIsLive(false);
     setDuration(0);
@@ -896,22 +980,18 @@ export function useStudioEngine() {
   // ── Captions ──────────────────────────────────────────────────────────────
   const updateCaption = useCallback((text: string) => {
     captionTextRef.current = text;
-    captionVisibleUntilRef.current = Date.now() + 5000; // show for 5s
+    captionVisibleUntilRef.current = Date.now() + 5000;
     setCaptions(text);
     analyticsDataRef.current.tickerMessages++;
   }, []);
-
   const enableCaptions = useCallback(() => setCaptionsEnabled(true), []);
   const disableCaptions = useCallback(() => { setCaptionsEnabled(false); captionTextRef.current = ''; }, []);
 
   // ── Ticker ────────────────────────────────────────────────────────────────
   const showTicker = useCallback((text: string) => {
-    setTicker(text);
-    setTickerVisible(true);
-    tickerXRef.current = CANVAS_W;
+    setTicker(text); setTickerVisible(true); tickerXRef.current = CANVAS_W;
     analyticsDataRef.current.tickerMessages++;
   }, []);
-
   const hideTicker = useCallback(() => setTickerVisible(false), []);
 
   // ── Overlays ──────────────────────────────────────────────────────────────
@@ -919,41 +999,24 @@ export function useStudioEngine() {
     const overlay: OverlayText = { ...ov, id: `ov-${Date.now()}` };
     setScenes(prev => prev.map(s => s.id === sceneId ? { ...s, overlays: [...(s.overlays || []), overlay] } : s));
   }, []);
-
   const updateOverlay = useCallback((sceneId: string, ovId: string, patch: Partial<OverlayText>) => {
-    setScenes(prev => prev.map(s =>
-      s.id === sceneId ? { ...s, overlays: (s.overlays || []).map(o => o.id === ovId ? { ...o, ...patch } : o) } : s
-    ));
+    setScenes(prev => prev.map(s => s.id === sceneId ? { ...s, overlays: (s.overlays || []).map(o => o.id === ovId ? { ...o, ...patch } : o) } : s));
   }, []);
-
   const removeOverlay = useCallback((sceneId: string, ovId: string) => {
-    setScenes(prev => prev.map(s =>
-      s.id === sceneId ? { ...s, overlays: (s.overlays || []).filter(o => o.id !== ovId) } : s
-    ));
+    setScenes(prev => prev.map(s => s.id === sceneId ? { ...s, overlays: (s.overlays || []).filter(o => o.id !== ovId) } : s));
   }, []);
 
-  // ── Rundown management ────────────────────────────────────────────────────
-  const addRundownSegment = useCallback((seg: Omit<RundownSegment, 'id'>) => {
-    setRundown(prev => [...prev, { ...seg, id: `rd-${Date.now()}` }]);
-  }, []);
-
+  // ── Rundown ────────────────────────────────────────────────────────────────
+  const addRundownSegment = useCallback((seg: Omit<RundownSegment, 'id'>) => { setRundown(prev => [...prev, { ...seg, id: `rd-${Date.now()}` }]); }, []);
   const removeRundownSegment = useCallback((id: string) => setRundown(prev => prev.filter(s => s.id !== id)), []);
+  const updateRundownSegment = useCallback((id: string, patch: Partial<RundownSegment>) => { setRundown(prev => prev.map(s => s.id === id ? { ...s, ...patch } : s)); }, []);
 
-  const updateRundownSegment = useCallback((id: string, patch: Partial<RundownSegment>) => {
-    setRundown(prev => prev.map(s => s.id === id ? { ...s, ...patch } : s));
-  }, []);
-
-  // ── Ad management ─────────────────────────────────────────────────────────
-  const addAdSlot = useCallback((ad: Omit<AdSlot, 'id'>) => {
-    setAdSlots(prev => [...prev, { ...ad, id: `ad-${Date.now()}` }]);
-  }, []);
-
+  // ── Ads ────────────────────────────────────────────────────────────────────
+  const addAdSlot = useCallback((ad: Omit<AdSlot, 'id'>) => { setAdSlots(prev => [...prev, { ...ad, id: `ad-${Date.now()}` }]); }, []);
   const removeAdSlot = useCallback((id: string) => setAdSlots(prev => prev.filter(a => a.id !== id)), []);
 
-  // ── Chroma key ────────────────────────────────────────────────────────────
-  const updateChromaKey = useCallback((patch: Partial<ChromaKeySettings>) => {
-    setChromaKey(prev => ({ ...prev, ...patch }));
-  }, []);
+  // ── Chroma key ─────────────────────────────────────────────────────────────
+  const updateChromaKey = useCallback((patch: Partial<ChromaKeySettings>) => { setChromaKey(prev => ({ ...prev, ...patch })); }, []);
 
   // Cleanup
   useEffect(() => {
@@ -962,9 +1025,9 @@ export function useStudioEngine() {
       if (previewRafRef.current) cancelAnimationFrame(previewRafRef.current);
       if (durationRef.current) clearInterval(durationRef.current);
       if (healthRef.current) clearInterval(healthRef.current);
-      if (analyticsRef.current) clearInterval(analyticsRef.current);
       cameraStream?.getTracks().forEach(t => t.stop());
       pipStream?.getTracks().forEach(t => t.stop());
+      autoDJAudioRef.current?.pause();
     };
   }, [cameraStream, pipStream]);
 
@@ -986,6 +1049,13 @@ export function useStudioEngine() {
     rundown,
     adSlots,
     analytics,
+    autoDJ,
+    playlists,
+    hotkeys,
+    guestLayout,
+    listenerCount,
+    stationName,
+    analyser: analyserRef.current,
     canvasRef,
     previewCanvasRef,
     videoElemRef,
@@ -1029,5 +1099,23 @@ export function useStudioEngine() {
     updateCaption,
     enableCaptions,
     disableCaptions,
+    // AutoDJ
+    autoDJPlay,
+    autoDJPause,
+    autoDJSkip,
+    autoDJSetMode,
+    autoDJSetPlaylist,
+    autoDJSetCrossfade,
+    autoDJSetAdInterval,
+    autoDJToggleAutoSwitch,
+    addPlaylist,
+    removePlaylist,
+    addMediaToPlaylist,
+    removeMediaFromPlaylist,
+    // Misc
+    setHotkeys: (h: SceneHotkey[]) => setHotkeys(h),
+    setGuestLayout,
+    setListenerCount,
+    setStationName,
   };
 }

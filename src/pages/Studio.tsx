@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState } from 'react';
 import { useStudioEngine } from '@/hooks/useStudioEngine';
 import ProgramMonitor from '@/components/studio/ProgramMonitor';
 import SceneSwitcher from '@/components/studio/SceneSwitcher';
@@ -14,9 +14,14 @@ import ChromaKeyPanel from '@/components/studio/ChromaKeyPanel';
 import CaptionsOverlay from '@/components/studio/CaptionsOverlay';
 import GuestCallPanel from '@/components/studio/GuestCallPanel';
 import AnalyticsDashboard from '@/components/studio/AnalyticsDashboard';
+import AutoDJPanel from '@/components/studio/AutoDJPanel';
+import MultiCameraGrid from '@/components/studio/MultiCameraGrid';
+import SceneHotkeys from '@/components/studio/SceneHotkeys';
+import RadioPanel from '@/components/studio/RadioPanel';
+import GuestLayoutPicker from '@/components/studio/GuestLayoutPicker';
 import {
   Radio, ArrowLeft, Monitor, Layers, Mic2, Settings, Clock,
-  Tv, Zap, Scissors, Captions, Users, BarChart2
+  Tv, Zap, Scissors, Captions, Users, BarChart2, Music, Grid, RadioTower
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { cn } from '@/lib/utils';
@@ -24,12 +29,16 @@ import { AdSlot } from '@/types/studio';
 
 type Panel =
   | 'monitor' | 'scenes' | 'audio' | 'rundown' | 'ads'
-  | 'overlays' | 'output' | 'chroma' | 'captions' | 'guests' | 'analytics';
+  | 'overlays' | 'output' | 'chroma' | 'captions' | 'guests'
+  | 'analytics' | 'autodj' | 'grid' | 'radio';
 
 const PANELS: { id: Panel; label: string; icon: React.ElementType }[] = [
-  { id: 'monitor',   label: 'Monitors',  icon: Monitor },
+  { id: 'monitor',   label: 'Monitor',   icon: Monitor },
+  { id: 'grid',      label: 'Grid',      icon: Grid },
   { id: 'scenes',    label: 'Scenes',    icon: Layers },
   { id: 'audio',     label: 'Audio',     icon: Mic2 },
+  { id: 'autodj',    label: 'AutoDJ',    icon: Music },
+  { id: 'radio',     label: 'Radio',     icon: RadioTower },
   { id: 'rundown',   label: 'Rundown',   icon: Clock },
   { id: 'ads',       label: 'Ads',       icon: Tv },
   { id: 'overlays',  label: 'Graphics',  icon: Zap },
@@ -46,8 +55,9 @@ export default function Studio() {
 
   const engine = useStudioEngine();
   const {
-    state, cameras, cameraStream, pipStream, facingMode, ticker, tickerVisible,
-    rundown, adSlots, analytics,
+    state, cameras, cameraStream, pipStream, guestStream, facingMode, ticker, tickerVisible,
+    rundown, adSlots, analytics, autoDJ, playlists, hotkeys, guestLayout, listenerCount, stationName,
+    analyser,
     canvasRef, previewCanvasRef, videoElemRef, mediaVideoRef, mediaImageRef, pipVideoRef, guestVideoRef,
     startCamera, stopCamera, flipCamera, startPip, stopPip,
     switchScene, setPreviewScene, takeToProgram,
@@ -64,18 +74,20 @@ export default function Studio() {
     updateChromaKey,
     handleGuestStream,
     updateCaption, enableCaptions, disableCaptions,
+    autoDJPlay, autoDJPause, autoDJSkip, autoDJSetMode, autoDJSetPlaylist,
+    autoDJSetCrossfade, autoDJSetAdInterval, autoDJToggleAutoSwitch,
+    addPlaylist, removePlaylist, addMediaToPlaylist, removeMediaFromPlaylist,
+    setHotkeys, setGuestLayout, setListenerCount, setStationName,
   } = engine;
 
   const {
     isLive, isRecording, duration, scenes, currentSceneId, previewSceneId,
-    audioTracks, output, pip, transition, transitionDuration, chromaKey,
-    captionsEnabled, health,
+    audioTracks, output, pip, transition, transitionDuration, chromaKey, captionsEnabled, health,
   } = state;
 
   const currentScene = scenes.find(s => s.id === currentSceneId);
   const isActive = isLive || isRecording;
 
-  // Scene names map for analytics
   const sceneNames: Record<string, string> = {};
   scenes.forEach(s => { sceneNames[s.id] = s.name; });
 
@@ -99,7 +111,7 @@ export default function Studio() {
   return (
     <div className="min-h-screen flex flex-col bg-[hsl(220,25%,3%)] overflow-x-hidden">
 
-      {/* ── Top bar ─────────────────────────────────────────────────── */}
+      {/* ── Top bar ─────────────────────────────────────────────────────── */}
       <header className="h-12 flex items-center px-3 border-b border-border/50 bg-[hsl(220,22%,5%)] shrink-0 gap-3">
         <Link to="/" className="w-8 h-8 flex items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors shrink-0">
           <ArrowLeft size={15} />
@@ -107,14 +119,14 @@ export default function Studio() {
         <div className="w-7 h-7 rounded-xl bg-emerald-600 flex items-center justify-center shadow-[0_0_10px_rgba(16,185,129,0.5)] shrink-0">
           <Radio size={13} className="text-white" />
         </div>
-        <div className="hidden sm:block">
+        <div className="hidden sm:block shrink-0">
           <span className="font-mono-console text-xs font-bold tracking-widest text-foreground uppercase">Live Studio</span>
           <span className="font-mono-console text-[8px] text-muted-foreground block leading-none mt-0.5 tracking-wider">INDEPENDENT BROADCAST</span>
         </div>
 
         {/* Tally lights */}
         <div className="flex-1 flex items-center justify-center gap-1.5 overflow-x-auto no-scrollbar">
-          {scenes.slice(0, 8).map(scene => (
+          {scenes.slice(0, 10).map(scene => (
             <div key={scene.id} className="flex flex-col items-center gap-0.5 shrink-0">
               <div className={cn('w-2.5 h-2.5 rounded-full border transition-all',
                 scene.id === currentSceneId
@@ -130,16 +142,26 @@ export default function Studio() {
           ))}
         </div>
 
-        {/* Status indicators */}
-        <div className="flex items-center gap-2 shrink-0">
+        {/* Right status zone */}
+        <div className="flex items-center gap-1.5 shrink-0">
+          {/* Hotkey toggle */}
+          <SceneHotkeys
+            scenes={scenes}
+            hotkeys={hotkeys}
+            onSwitch={switchScene}
+            onTakeToProgram={takeToProgram}
+            onUpdateHotkeys={setHotkeys}
+          />
+
           {chromaKey.enabled && (
-            <span className="hidden sm:flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 font-mono-console text-[8px] text-emerald-400">
-              CK
-            </span>
+            <span className="hidden sm:flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 font-mono-console text-[8px] text-emerald-400">CK</span>
           )}
           {captionsEnabled && (
-            <span className="hidden sm:flex items-center gap-1 px-2 py-0.5 rounded-full bg-blue-500/10 border border-blue-500/20 font-mono-console text-[8px] text-blue-400">
-              CC
+            <span className="hidden sm:flex items-center gap-1 px-2 py-0.5 rounded-full bg-blue-500/10 border border-blue-500/20 font-mono-console text-[8px] text-blue-400">CC</span>
+          )}
+          {autoDJ.status === 'playing' && (
+            <span className="hidden sm:flex items-center gap-1 px-2 py-0.5 rounded-full bg-purple-500/10 border border-purple-500/20 font-mono-console text-[8px] text-purple-400">
+              <span className="w-1.5 h-1.5 rounded-full bg-purple-400 animate-pulse" />DJ
             </span>
           )}
           {cameraStream && (
@@ -158,19 +180,16 @@ export default function Studio() {
             </span>
           )}
           {adPlayingId && (
-            <span className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-amber-600/20 border border-amber-500/40 font-mono-console text-[9px] text-amber-300">
-              AD
-            </span>
+            <span className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-amber-600/20 border border-amber-500/40 font-mono-console text-[9px] text-amber-300 animate-pulse">AD</span>
           )}
         </div>
       </header>
 
-      {/* ── Main layout ──────────────────────────────────────────────── */}
+      {/* ── Main layout ──────────────────────────────────────────────────────── */}
       <main className="flex-1 flex flex-col lg:flex-row overflow-hidden">
 
-        {/* ── Left: Program + Preview + quick scene row ───────────── */}
+        {/* ── Left: Program + Preview + scene rail ──────────────────────────── */}
         <div className="lg:flex-1 flex flex-col overflow-hidden">
-
           <div className="p-2.5 lg:p-3 space-y-2.5 shrink-0">
             {/* Dual monitors */}
             <ProgramMonitor
@@ -188,7 +207,7 @@ export default function Studio() {
 
             {/* Quick scene rail */}
             <div className="flex gap-1.5 overflow-x-auto no-scrollbar pb-0.5">
-              {scenes.map(scene => (
+              {scenes.map((scene, idx) => (
                 <button
                   key={scene.id}
                   onDoubleClick={() => switchScene(scene.id)}
@@ -201,21 +220,25 @@ export default function Studio() {
                       ? 'border-emerald-500 bg-emerald-500/10 text-emerald-400'
                       : 'border-border/50 bg-secondary/10 text-muted-foreground hover:text-foreground'
                   )}
+                  title={`${idx < 9 ? `Key: ${idx + 1}` : ''}`}
                 >
                   <span className="mr-1">{scene.icon}</span>
                   {scene.name}
+                  {idx < 9 && (
+                    <span className="ml-1 font-mono-console text-[7px] opacity-40">{idx + 1}</span>
+                  )}
                 </button>
               ))}
             </div>
             <p className="font-mono-console text-[7px] text-muted-foreground/30 text-center">
-              Tap → Preview bus  ·  Double-tap → Program immediately
+              Tap → Preview  ·  Double-tap → Program  ·  Number keys 1–9 = scenes  ·  Space = CUT
             </p>
           </div>
 
-          {/* Desktop left panel content */}
+          {/* Desktop left panel overflow content */}
           <div className="flex-1 overflow-y-auto px-2.5 lg:px-3 pb-3 lg:block hidden">
             {activePanel === 'audio' && (
-              <StudioMixer tracks={audioTracks} onVolume={setTrackVolume} onMute={toggleTrackMute} />
+              <StudioMixer tracks={audioTracks} onVolume={setTrackVolume} onMute={toggleTrackMute} analyser={analyser} />
             )}
             {activePanel === 'overlays' && (
               <div className="space-y-4">
@@ -235,22 +258,45 @@ export default function Studio() {
             {activePanel === 'analytics' && (
               <AnalyticsDashboard analytics={analytics} sceneNames={sceneNames} isLive={isActive} />
             )}
+            {activePanel === 'autodj' && (
+              <AutoDJPanel
+                autoDJ={autoDJ} playlists={playlists}
+                onPlay={autoDJPlay} onPause={autoDJPause} onSkip={autoDJSkip}
+                onSetMode={autoDJSetMode} onSetPlaylist={autoDJSetPlaylist}
+                onAddPlaylist={addPlaylist} onRemovePlaylist={removePlaylist}
+                onAddMediaToPlaylist={addMediaToPlaylist} onRemoveMediaFromPlaylist={removeMediaFromPlaylist}
+                onSetCrossfade={autoDJSetCrossfade} onSetAdInterval={autoDJSetAdInterval}
+                onToggleAutoSwitchLive={autoDJToggleAutoSwitch}
+              />
+            )}
+            {activePanel === 'grid' && (
+              <MultiCameraGrid
+                scenes={scenes} currentSceneId={currentSceneId} previewSceneId={previewSceneId}
+                cameraStream={cameraStream} pipStream={pipStream} guestStream={guestStream}
+                onSwitch={switchScene} onPreview={setPreviewScene}
+              />
+            )}
           </div>
         </div>
 
-        {/* ── Right: Control panel ─────────────────────────────────── */}
+        {/* ── Right: Control panel ──────────────────────────────────────────── */}
         <div className="lg:w-[380px] xl:w-[420px] flex flex-col border-t lg:border-t-0 lg:border-l border-border/50 bg-[hsl(220,20%,6%)] shrink-0">
 
-          {/* Panel tabs — scrollable */}
+          {/* Panel tabs */}
           <div className="flex border-b border-border/50 bg-[hsl(220,22%,5%)] overflow-x-auto no-scrollbar shrink-0">
             {PANELS.map(panel => {
               const Icon = panel.icon;
+              const hasIndicator = (
+                (panel.id === 'autodj' && autoDJ.status === 'playing') ||
+                (panel.id === 'guests' && !!guestStream) ||
+                (panel.id === 'radio' && (isLive || isRecording))
+              );
               return (
                 <button
                   key={panel.id}
                   onClick={() => setActivePanel(panel.id)}
                   className={cn(
-                    'flex-shrink-0 flex flex-col items-center gap-0.5 px-2 py-2.5 border-b-2 transition-colors',
+                    'flex-shrink-0 flex flex-col items-center gap-0.5 px-2 py-2.5 border-b-2 transition-colors relative',
                     activePanel === panel.id
                       ? 'border-primary text-foreground bg-secondary/20'
                       : 'border-transparent text-muted-foreground hover:text-foreground'
@@ -258,6 +304,9 @@ export default function Studio() {
                 >
                   <Icon size={13} />
                   <span className="font-mono-console text-[7px] uppercase tracking-wider">{panel.label}</span>
+                  {hasIndicator && (
+                    <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                  )}
                 </button>
               );
             })}
@@ -283,6 +332,14 @@ export default function Studio() {
               </div>
             )}
 
+            {activePanel === 'grid' && (
+              <MultiCameraGrid
+                scenes={scenes} currentSceneId={currentSceneId} previewSceneId={previewSceneId}
+                cameraStream={cameraStream} pipStream={pipStream} guestStream={guestStream}
+                onSwitch={switchScene} onPreview={setPreviewScene}
+              />
+            )}
+
             {activePanel === 'scenes' && (
               <SceneSwitcher
                 scenes={scenes} currentSceneId={currentSceneId} previewSceneId={previewSceneId}
@@ -294,7 +351,27 @@ export default function Studio() {
             )}
 
             {activePanel === 'audio' && (
-              <StudioMixer tracks={audioTracks} onVolume={setTrackVolume} onMute={toggleTrackMute} />
+              <StudioMixer tracks={audioTracks} onVolume={setTrackVolume} onMute={toggleTrackMute} analyser={analyser} />
+            )}
+
+            {activePanel === 'autodj' && (
+              <AutoDJPanel
+                autoDJ={autoDJ} playlists={playlists}
+                onPlay={autoDJPlay} onPause={autoDJPause} onSkip={autoDJSkip}
+                onSetMode={autoDJSetMode} onSetPlaylist={autoDJSetPlaylist}
+                onAddPlaylist={addPlaylist} onRemovePlaylist={removePlaylist}
+                onAddMediaToPlaylist={addMediaToPlaylist} onRemoveMediaFromPlaylist={removeMediaFromPlaylist}
+                onSetCrossfade={autoDJSetCrossfade} onSetAdInterval={autoDJSetAdInterval}
+                onToggleAutoSwitchLive={autoDJToggleAutoSwitch}
+              />
+            )}
+
+            {activePanel === 'radio' && (
+              <RadioPanel
+                autoDJ={autoDJ} health={health} isLive={isLive} isRecording={isRecording}
+                duration={duration} listenerCount={listenerCount} onSetListenerCount={setListenerCount}
+                stationName={stationName} onSetStationName={setStationName}
+              />
             )}
 
             {activePanel === 'rundown' && (
@@ -328,7 +405,7 @@ export default function Studio() {
                 <ChromaKeyPanel settings={chromaKey} onChange={updateChromaKey} />
                 <div className="p-3 rounded-xl border border-border/40 bg-secondary/5">
                   <p className="font-mono-console text-[9px] text-muted-foreground/60 leading-relaxed">
-                    For best results: use a solid green or blue backdrop, ensure even lighting with no shadows, and keep your distance from the screen. Tolerance 30–50% works for most setups.
+                    Use a solid green or blue backdrop with even lighting. Tolerance 30–50% works for most setups.
                   </p>
                 </div>
               </div>
@@ -342,16 +419,20 @@ export default function Studio() {
                   onDisable={disableCaptions}
                   onCaptionUpdate={updateCaption}
                 />
-                <div className="p-3 rounded-xl border border-border/40 bg-secondary/5">
-                  <p className="font-mono-console text-[9px] text-muted-foreground/60 leading-relaxed">
-                    Captions use Web Speech API and render directly onto your program canvas. Works best in Chrome or Edge with a good microphone.
-                  </p>
-                </div>
               </div>
             )}
 
             {activePanel === 'guests' && (
-              <GuestCallPanel onGuestStream={handleGuestStream} />
+              <div className="space-y-4">
+                <GuestCallPanel onGuestStream={handleGuestStream} />
+                <div className="border-t border-border/50 pt-4">
+                  <GuestLayoutPicker
+                    layout={guestLayout}
+                    onChange={setGuestLayout}
+                    guestCount={guestStream ? 1 : 0}
+                  />
+                </div>
+              </div>
             )}
 
             {activePanel === 'analytics' && (

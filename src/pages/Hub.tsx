@@ -1,7 +1,8 @@
 import { Link } from 'react-router-dom';
 import {
   Radio, Wifi, Smartphone, Monitor, ArrowRight, CheckCircle2, Tv, Layers,
-  Clock, FlipHorizontal, FolderOpen, Activity, Scissors, Captions, Users, BarChart2
+  Clock, FlipHorizontal, FolderOpen, Activity, Scissors, Captions, Users,
+  BarChart2, Music, Grid, Keyboard, AudioLines, RadioTower
 } from 'lucide-react';
 import heroBg from '@/assets/hero-bg.jpg';
 
@@ -21,7 +22,13 @@ const STUDIO_FEATURES = [
   'WebRTC guest video calls',
   'Stream analytics + CSV export',
   'News ticker & text overlays',
-  'Go live via WHIP (WebRTC)',
+  'AutoDJ with playlists',
+  'Multi-camera grid monitor',
+  'Scene keyboard hotkeys',
+  'Waveform audio visualizer',
+  'Radio station panel',
+  'Guest layout templates',
+  'RTMP / WHIP live streaming',
 ];
 
 const OBS_FEATURES = [
@@ -49,11 +56,11 @@ export default function Hub() {
             Broadcast Studio
           </h1>
           <p className="font-mono-console text-xs text-muted-foreground max-w-sm leading-relaxed">
-            Professional live TV production from your phone — no hardware, no OBS required
+            Professional TV + Radio production from your phone — no hardware, no OBS required
           </p>
 
           {/* Feature pills */}
-          <div className="flex flex-wrap justify-center gap-2 mt-5 max-w-lg">
+          <div className="flex flex-wrap justify-center gap-2 mt-5 max-w-xl">
             {[
               { icon: Layers,         label: 'PGM/PVW Bus' },
               { icon: FlipHorizontal, label: 'Camera Flip' },
@@ -65,6 +72,11 @@ export default function Hub() {
               { icon: Captions,       label: 'Live Captions' },
               { icon: Users,          label: 'Guest Calls' },
               { icon: BarChart2,      label: 'Analytics' },
+              { icon: Music,          label: 'AutoDJ' },
+              { icon: Grid,           label: 'Multi-Cam Grid' },
+              { icon: Keyboard,       label: 'Scene Hotkeys' },
+              { icon: AudioLines,     label: 'Waveform' },
+              { icon: RadioTower,     label: 'Radio Station' },
             ].map(f => (
               <div key={f.label} className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-secondary/40 border border-border">
                 <f.icon size={10} className="text-muted-foreground" />
@@ -91,10 +103,10 @@ export default function Hub() {
               <div className="flex items-center gap-2 mb-1 flex-wrap">
                 <h2 className="font-mono-console text-base font-bold text-foreground uppercase tracking-wider">Mobile Studio</h2>
                 <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-500/30 font-mono-console text-[8px] text-emerald-400 uppercase tracking-wider">No OBS Needed</span>
-                <span className="px-2 py-0.5 rounded-full bg-primary/20 border border-primary/30 font-mono-console text-[8px] text-primary uppercase tracking-wider">Pro TV</span>
+                <span className="px-2 py-0.5 rounded-full bg-primary/20 border border-primary/30 font-mono-console text-[8px] text-primary uppercase tracking-wider">Pro TV + Radio</span>
               </div>
               <p className="font-mono-console text-[10px] text-muted-foreground leading-relaxed mb-3">
-                Full TV control room in your browser — camera, audio, chroma key, live captions, guest calls, analytics, ads, and live streaming.
+                Full TV control room + Radio automation in your browser — camera, AutoDJ, guests, analytics, ads, and live streaming.
               </p>
               <div className="grid grid-cols-2 gap-1">
                 {STUDIO_FEATURES.map(f => (
@@ -146,13 +158,15 @@ export default function Hub() {
             {[
               { label: 'getUserMedia', desc: '4K Camera + Mic' },
               { label: 'Canvas API', desc: 'Scene compositor' },
-              { label: 'Web Audio API', desc: 'Audio mixer' },
+              { label: 'Web Audio API', desc: 'Audio mixer + DJ' },
               { label: 'MediaRecorder', desc: '4K encoder' },
               { label: 'File System API', desc: 'Folder save' },
               { label: 'WHIP/WebRTC', desc: 'Live stream' },
               { label: 'SpeechRecognition', desc: 'Live captions' },
               { label: 'BroadcastChannel', desc: 'Guest signaling' },
               { label: 'ImageData API', desc: 'Chroma key' },
+              { label: 'Web Audio Analyser', desc: 'Waveform + VU' },
+              { label: 'MediaElement API', desc: 'AutoDJ playback' },
             ].map(item => (
               <div key={item.label} className="px-2.5 py-1.5 rounded-lg bg-secondary border border-border">
                 <p className="font-mono-console text-[9px] text-foreground">{item.label}</p>

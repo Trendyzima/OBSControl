@@ -33,25 +33,15 @@ export interface StudioScene {
   id: string;
   name: string;
   sourceType: SceneSourceType;
-  /** For camera scenes: which camera device id */
   cameraDeviceId?: string;
-  /** For video scenes: the loaded media URL */
   mediaUrl?: string;
-  /** For image scenes: the loaded image URL */
   imageUrl?: string;
-  /** For color scenes: hex color */
   bgColor?: string;
-  /** Label shown on scene button */
   icon: string;
-  /** Thumbnail for preview (data URL) */
   thumbnail?: string;
-  /** Text overlays rendered on top */
   overlays?: OverlayText[];
-  /** Category tag */
   category?: 'main' | 'ad' | 'transition' | 'graphics';
-  /** Duration in seconds (for ads/rundown) */
   plannedDuration?: number;
-  /** Chroma key settings for camera scenes */
   chromaKey?: ChromaKeySettings;
 }
 
@@ -65,7 +55,7 @@ export interface AudioTrack {
   level?: number; // 0–100 live VU
 }
 
-export type OutputMode = 'record' | 'whip' | 'folder' | 'none';
+export type OutputMode = 'record' | 'whip' | 'folder' | 'rtmp' | 'none';
 
 export interface StreamOutput {
   mode: OutputMode;
@@ -105,6 +95,8 @@ export interface AdSlot {
   duration: number; // seconds
   thumbnail?: string;
   scheduled?: boolean;
+  advertiser?: string;
+  playSongsAfter?: number; // play every N songs in AutoDJ
 }
 
 export interface StudioState {
@@ -139,6 +131,51 @@ export interface GuestPeer {
   connected: boolean;
   muted: boolean;
   volume: number;
+  role?: 'host' | 'guest' | 'caller';
+}
+
+// Guest layout templates
+export type GuestLayout = 'solo' | 'duo' | 'trio' | 'quad' | 'panel-5' | 'panel-6';
+
+// AutoDJ types
+export interface MediaItem {
+  id: string;
+  title: string;
+  artist?: string;
+  duration: number; // seconds
+  url: string;
+  type: 'music' | 'video' | 'jingle' | 'stationid' | 'ad';
+  thumbnail?: string;
+  category?: string;
+  tags?: string[];
+  usageCount?: number;
+  dateAdded?: number;
+}
+
+export interface Playlist {
+  id: string;
+  name: string;
+  items: MediaItem[];
+  mode: 'sequential' | 'shuffle' | 'smart';
+  icon?: string;
+}
+
+export type AutoDJMode = 'manual' | 'automatic' | 'scheduled';
+export type AutoDJStatus = 'idle' | 'playing' | 'paused' | 'transitioning';
+
+export interface AutoDJState {
+  enabled: boolean;
+  status: AutoDJStatus;
+  mode: AutoDJMode;
+  currentPlaylistId: string | null;
+  currentIndex: number;
+  currentItem: MediaItem | null;
+  nextItem: MediaItem | null;
+  crossfadeDuration: number; // seconds
+  songsUntilAd: number;
+  adInterval: number; // every N songs
+  autoSwitchToLive: boolean;
+  graceBeforeReturn: number; // seconds before returning to AutoDJ after host leaves
 }
 
 // Analytics data collected during broadcast
@@ -153,4 +190,10 @@ export interface BroadcastAnalytics {
   adBreaks: number;
   tickerMessages: number;
   sceneUsage: Record<string, number>; // sceneId -> seconds
+}
+
+// Scene hotkey mapping
+export interface SceneHotkey {
+  key: string;
+  sceneId: string;
 }
