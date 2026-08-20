@@ -96,7 +96,7 @@ export interface AdSlot {
   thumbnail?: string;
   scheduled?: boolean;
   advertiser?: string;
-  playSongsAfter?: number; // play every N songs in AutoDJ
+  playSongsAfter?: number;
 }
 
 export interface StudioState {
@@ -107,15 +107,17 @@ export interface StudioState {
   output: StreamOutput;
   isLive: boolean;
   isRecording: boolean;
-  duration: number; // seconds
+  duration: number;
   error: string | null;
   transition: TransitionType;
-  transitionDuration: number; // ms
+  transitionDuration: number;
   pip: PiPSource;
   health: StreamHealth;
   chromaKey: ChromaKeySettings;
   captions: string;
   captionsEnabled: boolean;
+  chatOverlayEnabled: boolean;
+  pinnedChatMessage: { author: string; text: string } | null;
 }
 
 export interface CameraDevice {
@@ -134,15 +136,13 @@ export interface GuestPeer {
   role?: 'host' | 'guest' | 'caller';
 }
 
-// Guest layout templates
 export type GuestLayout = 'solo' | 'duo' | 'trio' | 'quad' | 'panel-5' | 'panel-6';
 
-// AutoDJ types
 export interface MediaItem {
   id: string;
   title: string;
   artist?: string;
-  duration: number; // seconds
+  duration: number;
   url: string;
   type: 'music' | 'video' | 'jingle' | 'stationid' | 'ad';
   thumbnail?: string;
@@ -171,14 +171,13 @@ export interface AutoDJState {
   currentIndex: number;
   currentItem: MediaItem | null;
   nextItem: MediaItem | null;
-  crossfadeDuration: number; // seconds
+  crossfadeDuration: number;
   songsUntilAd: number;
-  adInterval: number; // every N songs
+  adInterval: number;
   autoSwitchToLive: boolean;
-  graceBeforeReturn: number; // seconds before returning to AutoDJ after host leaves
+  graceBeforeReturn: number;
 }
 
-// Analytics data collected during broadcast
 export interface BroadcastAnalytics {
   sessionStart: number;
   sessionEnd: number | null;
@@ -189,10 +188,9 @@ export interface BroadcastAnalytics {
   avgBitrate: number;
   adBreaks: number;
   tickerMessages: number;
-  sceneUsage: Record<string, number>; // sceneId -> seconds
+  sceneUsage: Record<string, number>;
 }
 
-// Scene hotkey mapping
 export interface SceneHotkey {
   key: string;
   sceneId: string;

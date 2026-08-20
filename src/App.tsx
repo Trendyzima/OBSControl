@@ -7,6 +7,7 @@ import Hub from "./pages/Hub";
 import Studio from "./pages/Studio";
 import Index from "./pages/Index";
 import GuestPage from "./pages/GuestPage";
+import AuthPage from "./pages/AuthPage";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -22,6 +23,7 @@ const App = () => (
           <Route path="/studio" element={<Studio />} />
           <Route path="/obs" element={<Index />} />
           <Route path="/guest" element={<GuestPage />} />
+          <Route path="/auth" element={<AuthPage />} />
           <Route path="*" element={<NotFound />} />
         </Routes>
       </BrowserRouter>

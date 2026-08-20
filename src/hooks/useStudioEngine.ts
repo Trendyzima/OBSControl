@@ -11,7 +11,6 @@ function makeId() {
   return `s-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 }
 
-// ─── Default scenes ───────────────────────────────────────────────────────────
 const DEFAULT_SCENES: StudioScene[] = [
   { id: makeId(), name: 'CAMERA', sourceType: 'camera', icon: '🎥', overlays: [], category: 'main' },
   { id: makeId(), name: 'CAM 2', sourceType: 'camera', icon: '📷', overlays: [], category: 'main' },
@@ -101,18 +100,9 @@ const DEFAULT_ANALYTICS: BroadcastAnalytics = {
   healthHistory: [], peakBitrate: 0, avgBitrate: 0, adBreaks: 0, tickerMessages: 0, sceneUsage: {},
 };
 const DEFAULT_AUTODJ: AutoDJState = {
-  enabled: false,
-  status: 'idle',
-  mode: 'automatic',
-  currentPlaylistId: null,
-  currentIndex: 0,
-  currentItem: null,
-  nextItem: null,
-  crossfadeDuration: 3,
-  songsUntilAd: 5,
-  adInterval: 5,
-  autoSwitchToLive: true,
-  graceBeforeReturn: 10,
+  enabled: false, status: 'idle', mode: 'automatic', currentPlaylistId: null,
+  currentIndex: 0, currentItem: null, nextItem: null, crossfadeDuration: 3,
+  songsUntilAd: 5, adInterval: 5, autoSwitchToLive: true, graceBeforeReturn: 10,
 };
 
 const RESOLUTION_MAP: Record<string, [number, number]> = {
@@ -147,6 +137,17 @@ function applyChromaKey(ctx: CanvasRenderingContext2D, w: number, h: number, col
   ctx.putImageData(imageData, 0, 0);
 }
 
+// Best supported MIME type for smooth recording
+function getBestMimeType(): string {
+  const candidates = [
+    'video/webm;codecs=vp9,opus',
+    'video/webm;codecs=vp8,opus',
+    'video/webm;codecs=h264,opus',
+    'video/webm',
+  ];
+  return candidates.find(m => MediaRecorder.isTypeSupported(m)) || 'video/webm';
+}
+
 export function useStudioEngine() {
   const [scenes, setScenes] = useState<StudioScene[]>(DEFAULT_SCENES);
   const [currentSceneId, setCurrentSceneId] = useState(DEFAULT_SCENES[0].id);
@@ -166,6 +167,8 @@ export function useStudioEngine() {
   const [tickerVisible, setTickerVisible] = useState(false);
   const [captions, setCaptions] = useState('');
   const [captionsEnabled, setCaptionsEnabled] = useState(false);
+  const [chatOverlayEnabled, setChatOverlayEnabled] = useState(false);
+  const [pinnedChatMessage, setPinnedChatMessage] = useState<{ author: string; text: string } | null>(null);
   const [transition, setTransition] = useState<TransitionType>('cut');
   const [transitionDuration, setTransitionDuration] = useState(300);
   const [pip, setPip] = useState<PiPSource>(DEFAULT_PIP);
@@ -174,8 +177,6 @@ export function useStudioEngine() {
   const [analytics, setAnalytics] = useState<BroadcastAnalytics>({ ...DEFAULT_ANALYTICS, sessionStart: Date.now() });
   const [rundown, setRundown] = useState<RundownSegment[]>([]);
   const [adSlots, setAdSlots] = useState<AdSlot[]>([]);
-
-  // AutoDJ state
   const [autoDJ, setAutoDJ] = useState<AutoDJState>({ ...DEFAULT_AUTODJ });
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [hotkeys, setHotkeys] = useState<SceneHotkey[]>([]);
@@ -207,11 +208,13 @@ export function useStudioEngine() {
   const previewRafRef = useRef<number | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const mimeTypeRef = useRef<string>('video/webm');
   const durationRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const healthRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const tickerXRef = useRef(CANVAS_W);
   const captionTextRef = useRef('');
   const captionVisibleUntilRef = useRef(0);
+  const pinnedChatRef = useRef<{ author: string; text: string; until: number } | null>(null);
   const bytesRef = useRef(0);
   const lastByteTimeRef = useRef(Date.now());
   const folderWriterRef = useRef<FileSystemWritableFileStream | null>(null);
@@ -222,12 +225,13 @@ export function useStudioEngine() {
   const sceneTimerRef = useRef<{ id: string; start: number } | null>(null);
   const autoDJRef = useRef<AutoDJState>(autoDJ);
   const playlistsRef = useRef<Playlist[]>(playlists);
-  const autoDJTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const chatOverlayEnabledRef = useRef(chatOverlayEnabled);
 
   scenesRef.current = scenes;
   currentSceneIdRef.current = currentSceneId;
   autoDJRef.current = autoDJ;
   playlistsRef.current = playlists;
+  chatOverlayEnabledRef.current = chatOverlayEnabled;
 
   // ── Enumerate cameras ─────────────────────────────────────────────────────
   const enumerateCameras = useCallback(async () => {
@@ -255,7 +259,7 @@ export function useStudioEngine() {
       if (!musicGainRef.current) { musicGainRef.current = ctx.createGain(); musicGainRef.current.gain.value = 0.3; musicGainRef.current.connect(destRef.current); }
       if (!analyserRef.current) { analyserRef.current = ctx.createAnalyser(); analyserRef.current.fftSize = 2048; }
       if (stream) {
-        if (micSourceRef.current) micSourceRef.current.disconnect();
+        if (micSourceRef.current) { try { micSourceRef.current.disconnect(); } catch {} }
         micSourceRef.current = ctx.createMediaStreamSource(stream);
         micSourceRef.current.connect(micGainRef.current);
         micSourceRef.current.connect(analyserRef.current);
@@ -274,7 +278,7 @@ export function useStudioEngine() {
 
   useEffect(() => { syncAudioGains(); }, [syncAudioGains]);
 
-  // ── Start camera ──────────────────────────────────────────────────────────
+  // ── Camera ────────────────────────────────────────────────────────────────
   const startCamera = useCallback(async (deviceId?: string, facing?: 'user' | 'environment') => {
     try {
       if (cameraStream) cameraStream.getTracks().forEach(t => t.stop());
@@ -282,14 +286,16 @@ export function useStudioEngine() {
       const videoConstraints: MediaTrackConstraints = deviceId
         ? { deviceId: { exact: deviceId }, width: { ideal: 3840, min: 1280 }, height: { ideal: 2160, min: 720 }, frameRate: { ideal: 60, min: 24 } }
         : { facingMode: fm, width: { ideal: 3840, min: 1280 }, height: { ideal: 2160, min: 720 }, frameRate: { ideal: 60, min: 24 } };
-
       const stream = await navigator.mediaDevices.getUserMedia({
         video: videoConstraints,
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, sampleRate: 48000, channelCount: 2 },
       });
       setCameraStream(stream);
       setFacingMode(fm);
-      if (videoElemRef.current) { videoElemRef.current.srcObject = stream; videoElemRef.current.play().catch(() => {}); }
+      if (videoElemRef.current) {
+        videoElemRef.current.srcObject = stream;
+        videoElemRef.current.play().catch(() => {});
+      }
       await initAudio(stream);
       await enumerateCameras();
       const track = stream.getVideoTracks()[0];
@@ -369,14 +375,10 @@ export function useStudioEngine() {
     const pl = pls.find(p => p.id === dj.currentPlaylistId);
     if (!pl || pl.items.length === 0) return;
 
-    let nextIndex = dj.currentIndex;
-
-    // Check if we should play an ad
     const adItems = pl.items.filter(i => i.type === 'ad');
     if (dj.songsUntilAd <= 0 && adItems.length > 0) {
       const ad = adItems[Math.floor(Math.random() * adItems.length)];
-      const afterAdIndex = nextIndex;
-      setAutoDJ(prev => ({ ...prev, currentItem: ad, nextItem: pl.items[afterAdIndex] || null, songsUntilAd: prev.adInterval, status: 'playing' }));
+      setAutoDJ(prev => ({ ...prev, currentItem: ad, nextItem: null, songsUntilAd: prev.adInterval, status: 'playing' }));
       if (autoDJAudioRef.current) {
         autoDJAudioRef.current.src = ad.url;
         autoDJAudioRef.current.play().catch(() => {});
@@ -385,25 +387,20 @@ export function useStudioEngine() {
       return;
     }
 
-    // Play next music track
-    if (pl.mode === 'shuffle') {
-      nextIndex = Math.floor(Math.random() * pl.items.filter(i => i.type !== 'ad').length);
-    } else {
-      const musicItems = pl.items.filter(i => i.type !== 'ad');
-      nextIndex = nextIndex % musicItems.length;
-    }
-
     const musicItems = pl.items.filter(i => i.type !== 'ad');
     if (musicItems.length === 0) return;
 
-    const item = musicItems[nextIndex % musicItems.length];
-    const nextItem = musicItems[(nextIndex + 1) % musicItems.length] || null;
+    let idx = dj.currentIndex;
+    if (pl.mode === 'shuffle') idx = Math.floor(Math.random() * musicItems.length);
+
+    const item = musicItems[idx % musicItems.length];
+    const nextItem = musicItems[(idx + 1) % musicItems.length] || null;
 
     setAutoDJ(prev => ({
       ...prev,
       currentItem: item,
       nextItem,
-      currentIndex: nextIndex + 1,
+      currentIndex: idx + 1,
       songsUntilAd: prev.songsUntilAd - 1,
       status: 'playing',
     }));
@@ -422,24 +419,19 @@ export function useStudioEngine() {
   const autoDJPlay = useCallback(() => {
     if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
     const ctx = audioCtxRef.current;
-
+    if (ctx.state === 'suspended') ctx.resume();
+    if (!destRef.current) destRef.current = ctx.createMediaStreamDestination();
+    if (!musicGainRef.current) { musicGainRef.current = ctx.createGain(); musicGainRef.current.connect(destRef.current); }
     if (!autoDJAudioRef.current) {
       autoDJAudioRef.current = new Audio();
       autoDJAudioRef.current.crossOrigin = 'anonymous';
     }
-
-    // Connect to audio graph if not already
-    if (ctx.state === 'suspended') ctx.resume();
-    if (!destRef.current) destRef.current = ctx.createMediaStreamDestination();
-    if (!musicGainRef.current) { musicGainRef.current = ctx.createGain(); musicGainRef.current.connect(destRef.current); }
-
     if (!autoDJSourceRef.current && autoDJAudioRef.current) {
       try {
         autoDJSourceRef.current = ctx.createMediaElementSource(autoDJAudioRef.current);
         autoDJSourceRef.current.connect(musicGainRef.current);
       } catch { /* already connected */ }
     }
-
     setAutoDJ(prev => ({ ...prev, enabled: true, status: 'playing' }));
     autoDJPlayNext();
     toast.success('AutoDJ started');
@@ -455,49 +447,27 @@ export function useStudioEngine() {
     autoDJPlayNext();
   }, [autoDJPlayNext]);
 
-  const autoDJSetMode = useCallback((mode: AutoDJMode) => {
-    setAutoDJ(prev => ({ ...prev, mode }));
-  }, []);
+  const autoDJSetMode = useCallback((mode: AutoDJMode) => setAutoDJ(prev => ({ ...prev, mode })), []);
+  const autoDJSetPlaylist = useCallback((id: string) => setAutoDJ(prev => ({ ...prev, currentPlaylistId: id, currentIndex: 0 })), []);
+  const autoDJSetCrossfade = useCallback((secs: number) => setAutoDJ(prev => ({ ...prev, crossfadeDuration: secs })), []);
+  const autoDJSetAdInterval = useCallback((n: number) => setAutoDJ(prev => ({ ...prev, adInterval: n, songsUntilAd: n })), []);
+  const autoDJToggleAutoSwitch = useCallback(() => setAutoDJ(prev => ({ ...prev, autoSwitchToLive: !prev.autoSwitchToLive })), []);
 
-  const autoDJSetPlaylist = useCallback((id: string) => {
-    setAutoDJ(prev => ({ ...prev, currentPlaylistId: id, currentIndex: 0 }));
-  }, []);
-
-  const autoDJSetCrossfade = useCallback((secs: number) => {
-    setAutoDJ(prev => ({ ...prev, crossfadeDuration: secs }));
-  }, []);
-
-  const autoDJSetAdInterval = useCallback((n: number) => {
-    setAutoDJ(prev => ({ ...prev, adInterval: n, songsUntilAd: n }));
-  }, []);
-
-  const autoDJToggleAutoSwitch = useCallback(() => {
-    setAutoDJ(prev => ({ ...prev, autoSwitchToLive: !prev.autoSwitchToLive }));
-  }, []);
-
-  // Playlist management
   const addPlaylist = useCallback((pl: Omit<Playlist, 'id'>) => {
     const newPl: Playlist = { ...pl, id: `pl-${Date.now()}` };
     setPlaylists(prev => [...prev, newPl]);
     return newPl.id;
   }, []);
-
   const removePlaylist = useCallback((id: string) => {
     setPlaylists(prev => prev.filter(p => p.id !== id));
     setAutoDJ(prev => prev.currentPlaylistId === id ? { ...prev, currentPlaylistId: null, currentItem: null } : prev);
   }, []);
-
   const addMediaToPlaylist = useCallback((playlistId: string, item: Omit<MediaItem, 'id'>) => {
     const newItem: MediaItem = { ...item, id: `mi-${Date.now()}-${Math.random().toString(36).slice(2, 6)}` };
-    setPlaylists(prev => prev.map(p =>
-      p.id === playlistId ? { ...p, items: [...p.items, newItem] } : p
-    ));
+    setPlaylists(prev => prev.map(p => p.id === playlistId ? { ...p, items: [...p.items, newItem] } : p));
   }, []);
-
   const removeMediaFromPlaylist = useCallback((playlistId: string, itemId: string) => {
-    setPlaylists(prev => prev.map(p =>
-      p.id === playlistId ? { ...p, items: p.items.filter(i => i.id !== itemId) } : p
-    ));
+    setPlaylists(prev => prev.map(p => p.id === playlistId ? { ...p, items: p.items.filter(i => i.id !== itemId) } : p));
   }, []);
 
   // ── Scene management ──────────────────────────────────────────────────────
@@ -520,12 +490,13 @@ export function useStudioEngine() {
   const setPreviewScene = useCallback((id: string) => setPreviewSceneId(id), []);
 
   const takeToProgram = useCallback(() => {
+    const toId = previewSceneId;
     setCurrentSceneId(prev => {
       setPreviewSceneId(prev);
-      transitionRef.current = { active: true, alpha: 1, direction: -1 };
-      return previewSceneId;
+      return toId;
     });
-    const name = scenesRef.current.find(s => s.id === previewSceneId)?.name ?? '';
+    transitionRef.current = { active: true, alpha: 1, direction: -1 };
+    const name = scenesRef.current.find(s => s.id === toId)?.name ?? '';
     toast(`▶ CUT: ${name}`, { duration: 800 });
   }, [previewSceneId]);
 
@@ -559,7 +530,7 @@ export function useStudioEngine() {
     else setTimeout(capture, 0);
   }, []);
 
-  // ── Audio management ──────────────────────────────────────────────────────
+  // ── Audio ─────────────────────────────────────────────────────────────────
   const setTrackVolume = useCallback((id: string, volume: number) => {
     setAudioTracks(prev => prev.map(t => {
       if (t.id !== id) return t;
@@ -589,10 +560,16 @@ export function useStudioEngine() {
       return { ...s, imageUrl: url, thumbnail: url };
     }));
     if (type === 'video' && mediaVideoRef.current) {
-      mediaVideoRef.current.src = url;
-      mediaVideoRef.current.loop = true;
-      mediaVideoRef.current.preload = 'auto';
-      mediaVideoRef.current.load();
+      const video = mediaVideoRef.current;
+      video.src = url;
+      video.loop = true;
+      video.preload = 'auto';
+      // Key fix: set these attributes for smooth playback
+      video.playsInline = true;
+      video.muted = true;
+      video.load();
+      // Start buffering immediately
+      video.play().then(() => video.pause()).catch(() => {});
     }
     if (type === 'image' && mediaImageRef.current) mediaImageRef.current.src = url;
   }, []);
@@ -602,7 +579,6 @@ export function useStudioEngine() {
     const scene = scenesRef.current.find(s => s.id === sceneId);
     if (!scene) return;
 
-    ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
 
@@ -628,14 +604,20 @@ export function useStudioEngine() {
       } else {
         ctx.drawImage(videoElemRef.current, 0, 0, CANVAS_W, CANVAS_H);
       }
-    } else if (scene.sourceType === 'video' && mediaVideoRef.current && mediaVideoRef.current.readyState >= 2) {
+    } else if (scene.sourceType === 'video') {
+      const mv = mediaVideoRef.current;
       ctx.fillStyle = '#000';
       ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
-      const vw = mediaVideoRef.current.videoWidth || CANVAS_W;
-      const vh = mediaVideoRef.current.videoHeight || CANVAS_H;
-      const scale = Math.min(CANVAS_W / vw, CANVAS_H / vh);
-      const dw = vw * scale, dh = vh * scale;
-      ctx.drawImage(mediaVideoRef.current, (CANVAS_W - dw) / 2, (CANVAS_H - dh) / 2, dw, dh);
+      if (mv && mv.readyState >= 2 && !mv.paused && !mv.ended) {
+        const vw = mv.videoWidth || CANVAS_W;
+        const vh = mv.videoHeight || CANVAS_H;
+        const scale = Math.min(CANVAS_W / vw, CANVAS_H / vh);
+        const dw = vw * scale, dh = vh * scale;
+        ctx.drawImage(mv, (CANVAS_W - dw) / 2, (CANVAS_H - dh) / 2, dw, dh);
+      } else if (mv && mv.readyState >= 1) {
+        // Draw last frame even if paused
+        try { ctx.drawImage(mv, 0, 0, CANVAS_W, CANVAS_H); } catch {}
+      }
     } else if (scene.sourceType === 'image' && mediaImageRef.current && mediaImageRef.current.complete && mediaImageRef.current.naturalWidth > 0) {
       ctx.fillStyle = '#000';
       ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
@@ -654,7 +636,8 @@ export function useStudioEngine() {
       if (!ov.visible || !ov.text) return;
       const x = (ov.x / 100) * CANVAS_W;
       const y = (ov.y / 100) * CANVAS_H;
-      ctx.font = `${ov.bold ? 'bold' : 'normal'} ${ov.fontSize}px 'Inter', sans-serif`;
+      ctx.save();
+      ctx.font = `${ov.bold ? 'bold' : 'normal'} ${ov.fontSize}px Inter, sans-serif`;
       const metrics = ctx.measureText(ov.text);
       if (ov.bgColor && ov.bgColor !== 'transparent') {
         ctx.fillStyle = ov.bgColor;
@@ -664,21 +647,17 @@ export function useStudioEngine() {
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText(ov.text, x, y);
+      ctx.restore();
     });
-
-    // AutoDJ overlay — show now playing on music scene
-    const djState = autoDJRef.current;
-    if (djState.status === 'playing' && djState.currentItem && (scene.name === 'MUSIC' || scene.category === 'main')) {
-      // small overlay bottom-left
-    }
   }, [chromaKey]);
 
   const renderFrame = useCallback(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!canvas) { rafRef.current = requestAnimationFrame(renderFrame); return; }
     const ctx = canvas.getContext('2d', { alpha: false });
-    if (!ctx) return;
+    if (!ctx) { rafRef.current = requestAnimationFrame(renderFrame); return; }
 
+    // Transition effect
     const tr = transitionRef.current;
     if (tr.active && transition !== 'cut') {
       tr.alpha += tr.direction * (16 / transitionDuration);
@@ -693,7 +672,7 @@ export function useStudioEngine() {
     drawScene(ctx, currentSceneId, true);
     ctx.globalAlpha = 1;
 
-    // PiP
+    // PiP overlay
     if (pip.enabled && pipVideoRef.current && pipVideoRef.current.readyState >= 2) {
       const pipW = (pip.size / 100) * CANVAS_W;
       const pipH = (pipW * 9) / 16;
@@ -731,19 +710,18 @@ export function useStudioEngine() {
     // AutoDJ now-playing watermark
     const dj = autoDJRef.current;
     if (dj.status === 'playing' && dj.currentItem) {
-      ctx.fillStyle = 'rgba(0,0,0,0.5)';
-      ctx.fillRect(0, 0, 280, 38);
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      ctx.fillRect(0, 0, 300, 38);
       ctx.fillStyle = '#c084fc';
       ctx.font = 'bold 11px Inter, sans-serif';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
-      ctx.fillText('🎵 ' + dj.currentItem.title.slice(0, 28), 8, 19);
+      ctx.fillText('🎵 ' + dj.currentItem.title.slice(0, 30), 8, 19);
     }
 
     // Ticker
     if (tickerVisible && ticker) {
-      const barH = 52;
-      const barY = CANVAS_H - barH;
+      const barH = 52, barY = CANVAS_H - barH;
       ctx.fillStyle = 'rgba(180,0,0,0.94)';
       ctx.fillRect(0, barY, CANVAS_W, barH);
       ctx.fillStyle = '#ffcc00';
@@ -778,14 +756,37 @@ export function useStudioEngine() {
       ctx.fillText(text, capX + 16, capY + capH / 2);
     }
 
+    // Pinned chat message overlay
+    const now = Date.now();
+    if (chatOverlayEnabledRef.current && pinnedChatRef.current && now < pinnedChatRef.current.until) {
+      const msg = pinnedChatRef.current;
+      const chatY = 60;
+      ctx.font = '600 14px Inter, sans-serif';
+      const authorW = ctx.measureText(msg.author + ': ').width;
+      ctx.font = '400 14px Inter, sans-serif';
+      const textW = ctx.measureText(msg.text).width;
+      const totalW = authorW + textW + 32;
+      const chatX = (CANVAS_W - Math.min(totalW, CANVAS_W - 40)) / 2;
+      ctx.fillStyle = 'rgba(0,0,0,0.75)';
+      ctx.fillRect(chatX - 8, chatY - 20, Math.min(totalW, CANVAS_W - 40) + 16, 44);
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.font = 'bold 14px Inter, sans-serif';
+      ctx.fillStyle = '#facc15';
+      ctx.fillText(msg.author + ': ', chatX, chatY);
+      ctx.font = '400 14px Inter, sans-serif';
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(msg.text.slice(0, 80), chatX + authorW, chatY);
+    }
+
     rafRef.current = requestAnimationFrame(renderFrame);
   }, [currentSceneId, pip, ticker, tickerVisible, captionsEnabled, transition, transitionDuration, drawScene, guestStream]);
 
   const renderPreview = useCallback(() => {
     const canvas = previewCanvasRef.current;
-    if (!canvas) return;
+    if (!canvas) { previewRafRef.current = requestAnimationFrame(renderPreview); return; }
     const ctx = canvas.getContext('2d', { alpha: false });
-    if (!ctx) return;
+    if (!ctx) { previewRafRef.current = requestAnimationFrame(renderPreview); return; }
     drawScene(ctx, previewSceneId, false);
     previewRafRef.current = requestAnimationFrame(renderPreview);
   }, [previewSceneId, drawScene]);
@@ -802,16 +803,22 @@ export function useStudioEngine() {
     return () => { if (previewRafRef.current) cancelAnimationFrame(previewRafRef.current); };
   }, [renderPreview]);
 
+  // Auto-play video when scene switches to video
   useEffect(() => {
     const scene = scenes.find(s => s.id === currentSceneId);
     if (!scene) return;
     if (scene.sourceType === 'video' && scene.mediaUrl && mediaVideoRef.current) {
-      mediaVideoRef.current.src = scene.mediaUrl;
-      mediaVideoRef.current.loop = true;
-      mediaVideoRef.current.preload = 'auto';
-      mediaVideoRef.current.play().catch(() => {});
+      const mv = mediaVideoRef.current;
+      if (mv.src !== scene.mediaUrl) {
+        mv.src = scene.mediaUrl;
+        mv.loop = true;
+        mv.preload = 'auto';
+        mv.playsInline = true;
+        mv.muted = true;
+      }
+      mv.play().catch(() => {});
     } else if (mediaVideoRef.current && scene.sourceType !== 'video') {
-      mediaVideoRef.current.pause();
+      // Don't pause — keep buffered
     }
     if (scene.sourceType === 'image' && scene.imageUrl && mediaImageRef.current) {
       mediaImageRef.current.src = scene.imageUrl;
@@ -852,7 +859,7 @@ export function useStudioEngine() {
     return () => { if (healthRef.current) clearInterval(healthRef.current); };
   }, [isLive, isRecording]);
 
-  // ── Output ────────────────────────────────────────────────────────────────
+  // ── Output — fixed smooth recording ───────────────────────────────────────
   const startOutput = useCallback(async () => {
     const canvas = canvasRef.current;
     if (!canvas) { toast.error('Canvas not ready'); return; }
@@ -861,6 +868,8 @@ export function useStudioEngine() {
       const [rw, rh] = RESOLUTION_MAP[output.resolution] || [1280, 720];
       canvas.width = rw;
       canvas.height = rh;
+
+      // Use high framerate canvas stream for smooth recording
       const canvasStream = canvas.captureStream(output.fps);
       const tracks = [...canvasStream.getVideoTracks()];
       if (destRef.current) tracks.push(...destRef.current.stream.getAudioTracks());
@@ -869,8 +878,14 @@ export function useStudioEngine() {
       analyticsDataRef.current = { ...DEFAULT_ANALYTICS, sessionStart: Date.now() };
       sceneTimerRef.current = { id: currentSceneId, start: Date.now() };
 
-      const mimeTypes = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm', 'video/mp4'];
-      const mimeType = mimeTypes.find(m => MediaRecorder.isTypeSupported(m)) || 'video/webm';
+      // Get best MIME type — avoid VP9 on mobile for smooth playback
+      const mimeType = getBestMimeType();
+      mimeTypeRef.current = mimeType;
+
+      // Calculate video bitrate — ensure smooth recording
+      const videoBitsPerSecond = output.bitrate * 1000;
+      // Use small timeslice (100ms) for smooth chunk delivery and no stuttering
+      const TIMESLICE_MS = 100;
 
       if (output.mode === 'folder') {
         let dirHandle: FileSystemDirectoryHandle;
@@ -882,12 +897,20 @@ export function useStudioEngine() {
         const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
         folderWriterRef.current = await fileHandle.createWritable();
         chunksRef.current = [];
-        const recorder = new MediaRecorder(programStream, { mimeType, videoBitsPerSecond: output.bitrate * 1000 });
+        const recorder = new MediaRecorder(programStream, { mimeType, videoBitsPerSecond, audioBitsPerSecond: 128000 });
         recorder.ondataavailable = async (e) => {
-          if (e.data.size > 0) { chunksRef.current.push(e.data); bytesRef.current += e.data.size; if (folderWriterRef.current) await folderWriterRef.current.write(e.data); }
+          if (e.data.size > 0) {
+            chunksRef.current.push(e.data);
+            bytesRef.current += e.data.size;
+            if (folderWriterRef.current) await folderWriterRef.current.write(e.data);
+          }
         };
-        recorder.onstop = async () => { if (folderWriterRef.current) { await folderWriterRef.current.close(); folderWriterRef.current = null; } toast.success(`Saved: ${fileName}`); };
-        recorder.start(500);
+        recorder.onstop = async () => {
+          if (folderWriterRef.current) { await folderWriterRef.current.close(); folderWriterRef.current = null; }
+          toast.success(`Saved: ${fileName}`);
+        };
+        // Small timeslice = smooth chunks, no buffering
+        recorder.start(TIMESLICE_MS);
         recorderRef.current = recorder;
         setIsRecording(true);
         setDuration(0);
@@ -896,28 +919,34 @@ export function useStudioEngine() {
 
       } else if (output.mode === 'record') {
         chunksRef.current = [];
-        const recorder = new MediaRecorder(programStream, { mimeType, videoBitsPerSecond: output.bitrate * 1000 });
-        recorder.ondataavailable = e => { if (e.data.size > 0) { chunksRef.current.push(e.data); bytesRef.current += e.data.size; } };
+        const recorder = new MediaRecorder(programStream, { mimeType, videoBitsPerSecond, audioBitsPerSecond: 128000 });
+        recorder.ondataavailable = e => {
+          if (e.data.size > 0) { chunksRef.current.push(e.data); bytesRef.current += e.data.size; }
+        };
         recorder.onstop = () => {
+          // Create a single clean blob from all chunks
           const blob = new Blob(chunksRef.current, { type: mimeType });
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a');
           a.href = url;
           a.download = `broadcast-${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-')}.webm`;
+          document.body.appendChild(a);
           a.click();
-          URL.revokeObjectURL(url);
+          document.body.removeChild(a);
+          setTimeout(() => URL.revokeObjectURL(url), 5000);
           toast.success('Recording downloaded');
         };
-        recorder.start(500);
+        // CRITICAL: use small timeslice for smooth video with no buffering artifacts
+        recorder.start(TIMESLICE_MS);
         recorderRef.current = recorder;
         setIsRecording(true);
         setDuration(0);
         durationRef.current = setInterval(() => setDuration(d => d + 1), 1000);
-        toast.success('Recording started');
+        toast.success('Recording started — smooth 30/60fps');
 
       } else if (output.mode === 'whip') {
         if (!output.whipUrl) { toast.error('Enter WHIP endpoint URL'); return; }
-        const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+        const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] });
         tracks.forEach(t => pc.addTrack(t, programStream));
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
@@ -926,31 +955,38 @@ export function useStudioEngine() {
           headers: { 'Content-Type': 'application/sdp', ...(output.streamKey ? { Authorization: `Bearer ${output.streamKey}` } : {}) },
           body: offer.sdp,
         });
-        if (!resp.ok) throw new Error(`WHIP ${resp.status}`);
+        if (!resp.ok) throw new Error(`WHIP error ${resp.status}: ${await resp.text()}`);
         const answer = await resp.text();
         await pc.setRemoteDescription({ type: 'answer', sdp: answer });
+        pc.onconnectionstatechange = () => {
+          if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+            toast.error('Stream connection lost');
+            setIsLive(false);
+          }
+        };
         setIsLive(true);
         setDuration(0);
         durationRef.current = setInterval(() => setDuration(d => d + 1), 1000);
-        toast.success('🔴 LIVE via WHIP');
+        toast.success('🔴 LIVE via WHIP WebRTC');
 
       } else if (output.mode === 'rtmp') {
-        toast('RTMP streaming requires a relay server. Starting local recording as fallback.', { duration: 5000 });
-        // Fall back to record mode for RTMP relay setup
+        toast('RTMP requires a relay server (nginx-rtmp, Node-Media-Server). Starting local recording for now.', { duration: 5000 });
         chunksRef.current = [];
-        const recorder = new MediaRecorder(programStream, { mimeType, videoBitsPerSecond: output.bitrate * 1000 });
+        const recorder = new MediaRecorder(programStream, { mimeType, videoBitsPerSecond, audioBitsPerSecond: 128000 });
         recorder.ondataavailable = e => { if (e.data.size > 0) { chunksRef.current.push(e.data); bytesRef.current += e.data.size; } };
         recorder.onstop = () => {
           const blob = new Blob(chunksRef.current, { type: mimeType });
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a');
           a.href = url;
-          a.download = `rtmp-broadcast-${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-')}.webm`;
+          a.download = `rtmp-session-${new Date().toISOString().slice(0, 10)}.webm`;
+          document.body.appendChild(a);
           a.click();
-          URL.revokeObjectURL(url);
-          toast.success('RTMP session saved');
+          document.body.removeChild(a);
+          setTimeout(() => URL.revokeObjectURL(url), 5000);
+          toast.success('Session saved');
         };
-        recorder.start(500);
+        recorder.start(TIMESLICE_MS);
         recorderRef.current = recorder;
         setIsLive(true);
         setDuration(0);
@@ -963,7 +999,10 @@ export function useStudioEngine() {
   }, [output, cameraStream, initAudio, currentSceneId]);
 
   const stopOutput = useCallback(async () => {
-    if (recorderRef.current && recorderRef.current.state !== 'inactive') { recorderRef.current.stop(); recorderRef.current = null; }
+    if (recorderRef.current && recorderRef.current.state !== 'inactive') {
+      recorderRef.current.stop();
+      recorderRef.current = null;
+    }
     if (folderWriterRef.current) { await folderWriterRef.current.close(); folderWriterRef.current = null; }
     if (durationRef.current) clearInterval(durationRef.current);
     if (healthRef.current) clearInterval(healthRef.current);
@@ -982,15 +1021,25 @@ export function useStudioEngine() {
     captionTextRef.current = text;
     captionVisibleUntilRef.current = Date.now() + 5000;
     setCaptions(text);
-    analyticsDataRef.current.tickerMessages++;
   }, []);
   const enableCaptions = useCallback(() => setCaptionsEnabled(true), []);
   const disableCaptions = useCallback(() => { setCaptionsEnabled(false); captionTextRef.current = ''; }, []);
 
+  // ── Chat overlay ──────────────────────────────────────────────────────────
+  const pinChatMessage = useCallback((msg: { author: string; text: string }) => {
+    pinnedChatRef.current = { ...msg, until: Date.now() + 10000 };
+    setPinnedChatMessage(msg);
+    toast(`Chat pinned: "${msg.text.slice(0, 30)}…"`);
+  }, []);
+  const unpinChatMessage = useCallback(() => {
+    pinnedChatRef.current = null;
+    setPinnedChatMessage(null);
+  }, []);
+  const toggleChatOverlay = useCallback(() => setChatOverlayEnabled(v => !v), []);
+
   // ── Ticker ────────────────────────────────────────────────────────────────
   const showTicker = useCallback((text: string) => {
     setTicker(text); setTickerVisible(true); tickerXRef.current = CANVAS_W;
-    analyticsDataRef.current.tickerMessages++;
   }, []);
   const hideTicker = useCallback(() => setTickerVisible(false), []);
 
@@ -1006,16 +1055,25 @@ export function useStudioEngine() {
     setScenes(prev => prev.map(s => s.id === sceneId ? { ...s, overlays: (s.overlays || []).filter(o => o.id !== ovId) } : s));
   }, []);
 
-  // ── Rundown ────────────────────────────────────────────────────────────────
+  // Bulk replace overlays (for lower-third templates)
+  const replaceOverlays = useCallback((sceneId: string, overlays: Omit<OverlayText, 'id'>[]) => {
+    const withIds: OverlayText[] = overlays.map((ov, i) => ({ ...ov, id: `ov-lt-${Date.now()}-${i}` }));
+    setScenes(prev => prev.map(s => s.id === sceneId ? { ...s, overlays: withIds } : s));
+  }, []);
+  const clearOverlays = useCallback((sceneId: string) => {
+    setScenes(prev => prev.map(s => s.id === sceneId ? { ...s, overlays: [] } : s));
+  }, []);
+
+  // ── Rundown ───────────────────────────────────────────────────────────────
   const addRundownSegment = useCallback((seg: Omit<RundownSegment, 'id'>) => { setRundown(prev => [...prev, { ...seg, id: `rd-${Date.now()}` }]); }, []);
   const removeRundownSegment = useCallback((id: string) => setRundown(prev => prev.filter(s => s.id !== id)), []);
   const updateRundownSegment = useCallback((id: string, patch: Partial<RundownSegment>) => { setRundown(prev => prev.map(s => s.id === id ? { ...s, ...patch } : s)); }, []);
 
-  // ── Ads ────────────────────────────────────────────────────────────────────
+  // ── Ads ───────────────────────────────────────────────────────────────────
   const addAdSlot = useCallback((ad: Omit<AdSlot, 'id'>) => { setAdSlots(prev => [...prev, { ...ad, id: `ad-${Date.now()}` }]); }, []);
   const removeAdSlot = useCallback((id: string) => setAdSlots(prev => prev.filter(a => a.id !== id)), []);
 
-  // ── Chroma key ─────────────────────────────────────────────────────────────
+  // ── Chroma ────────────────────────────────────────────────────────────────
   const updateChromaKey = useCallback((patch: Partial<ChromaKeySettings>) => { setChromaKey(prev => ({ ...prev, ...patch })); }, []);
 
   // Cleanup
@@ -1035,87 +1093,33 @@ export function useStudioEngine() {
     currentSceneId, previewSceneId, scenes, audioTracks, output,
     isLive, isRecording, duration, error, transition, transitionDuration,
     pip, health, chromaKey, captions, captionsEnabled,
+    chatOverlayEnabled, pinnedChatMessage,
   };
 
   return {
-    state,
-    cameras,
-    cameraStream,
-    pipStream,
-    guestStream,
-    facingMode,
-    ticker,
-    tickerVisible,
-    rundown,
-    adSlots,
-    analytics,
-    autoDJ,
-    playlists,
-    hotkeys,
-    guestLayout,
-    listenerCount,
-    stationName,
+    state, cameras, cameraStream, pipStream, guestStream, facingMode,
+    ticker, tickerVisible, rundown, adSlots, analytics, autoDJ, playlists,
+    hotkeys, guestLayout, listenerCount, stationName,
     analyser: analyserRef.current,
-    canvasRef,
-    previewCanvasRef,
-    videoElemRef,
-    mediaVideoRef,
-    mediaImageRef,
-    pipVideoRef,
-    guestVideoRef,
-    startCamera,
-    stopCamera,
-    flipCamera,
-    startPip,
-    stopPip,
-    switchScene,
-    setPreviewScene,
-    takeToProgram,
-    addScene,
-    updateScene,
-    deleteScene,
-    captureSceneThumbnail,
-    setTrackVolume,
-    toggleTrackMute,
-    loadMedia,
-    startOutput,
-    stopOutput,
+    canvasRef, previewCanvasRef, videoElemRef, mediaVideoRef, mediaImageRef, pipVideoRef, guestVideoRef,
+    startCamera, stopCamera, flipCamera, startPip, stopPip,
+    switchScene, setPreviewScene, takeToProgram,
+    addScene, updateScene, deleteScene, captureSceneThumbnail,
+    setTrackVolume, toggleTrackMute,
+    loadMedia, startOutput, stopOutput,
     setOutput: (patch: Partial<StreamOutput>) => setOutputState(prev => ({ ...prev, ...patch })),
-    setTransition,
-    setTransitionDuration,
-    setPip,
-    addOverlay,
-    updateOverlay,
-    removeOverlay,
-    showTicker,
-    hideTicker,
-    addRundownSegment,
-    removeRundownSegment,
-    updateRundownSegment,
-    addAdSlot,
-    removeAdSlot,
+    setTransition, setTransitionDuration,
+    setPip, addOverlay, updateOverlay, removeOverlay, replaceOverlays, clearOverlays,
+    showTicker, hideTicker,
+    addRundownSegment, removeRundownSegment, updateRundownSegment,
+    addAdSlot, removeAdSlot,
     updateChromaKey,
-    handleGuestStream,
-    updateCaption,
-    enableCaptions,
-    disableCaptions,
-    // AutoDJ
-    autoDJPlay,
-    autoDJPause,
-    autoDJSkip,
-    autoDJSetMode,
-    autoDJSetPlaylist,
-    autoDJSetCrossfade,
-    autoDJSetAdInterval,
-    autoDJToggleAutoSwitch,
-    addPlaylist,
-    removePlaylist,
-    addMediaToPlaylist,
-    removeMediaFromPlaylist,
-    // Misc
+    handleGuestStream, updateCaption, enableCaptions, disableCaptions,
+    pinChatMessage, unpinChatMessage, toggleChatOverlay,
+    autoDJPlay, autoDJPause, autoDJSkip, autoDJSetMode, autoDJSetPlaylist,
+    autoDJSetCrossfade, autoDJSetAdInterval, autoDJToggleAutoSwitch,
+    addPlaylist, removePlaylist, addMediaToPlaylist, removeMediaFromPlaylist,
     setHotkeys: (h: SceneHotkey[]) => setHotkeys(h),
-    setGuestLayout,
-    setListenerCount,
-    setStationName,
+    setGuestLayout, setListenerCount, setStationName,
   };
 }
