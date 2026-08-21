@@ -31,6 +31,13 @@ export default function GuestPage() {
       const msg = e.data;
       if (!msg || msg.to !== guestId) return;
 
+      if (msg.type === 'rejected') {
+        setError('The host has declined your request to join.');
+        setJoined(false);
+        streamRef.current?.getTracks().forEach(t => t.stop());
+        return;
+      }
+
       if (msg.type === 'offer') {
         const pc = new RTCPeerConnection({
           iceServers: [

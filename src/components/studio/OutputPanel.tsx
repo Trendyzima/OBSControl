@@ -1,7 +1,13 @@
 import { useState } from 'react';
-import { StreamOutput, StudioState, StreamHealth } from '@/types/studio';
-import { Radio, Circle, Square, Wifi, HardDrive, FolderOpen, Activity, ChevronDown, ChevronUp, Info, ExternalLink } from 'lucide-react';
+import {
+  Settings, Circle, Square, Folder, Wifi, Radio, Zap, Upload,
+  Cloud, CheckCircle, AlertCircle, RefreshCw
+} from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { StudioState, StreamOutput } from '@/types/studio';
+import { useCloudStorage } from '@/hooks/useCloudStorage';
+import { UserProfile } from '@/lib/supabase';
+import { toast } from 'sonner';
 
 interface OutputPanelProps {
   state: StudioState;
@@ -10,255 +16,252 @@ interface OutputPanelProps {
   onStart: () => void;
   onStop: () => void;
   duration: number;
+  user?: UserProfile | null;
+  lastRecordingBlob?: { blob: Blob; name: string } | null;
+  onClearRecording?: () => void;
 }
-
-const PLATFORMS = [
-  { id: 'youtube',  label: 'YT',     color: 'text-red-500',       whipHint: 'https://stream.youtube.com/live2/YOUR_KEY/whip' },
-  { id: 'facebook', label: 'FB',     color: 'text-blue-400',      whipHint: 'https://media-api.facebook.com/rtmp/YOUR_KEY/whip' },
-  { id: 'twitch',   label: 'Twitch', color: 'text-purple-400',    whipHint: 'https://ingest.global-contribute.live-video.net/app/YOUR_KEY' },
-  { id: 'custom',   label: 'Custom', color: 'text-muted-foreground', whipHint: 'https://your-whip-endpoint/live' },
-] as const;
-
-const RESOLUTIONS = ['3840x2160', '1920x1080', '1280x720', '854x480'] as const;
-const BITRATES = [
-  { label: '2M', value: 2000 },
-  { label: '4M', value: 4000 },
-  { label: '6M', value: 6000 },
-  { label: '8M', value: 8000 },
-  { label: '12M', value: 12000 },
-];
 
 function formatDur(s: number) {
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
   return [h, m, sec].map(v => String(v).padStart(2, '0')).join(':');
 }
 
-function HealthBar({ health }: { health: StreamHealth }) {
-  const color   = health.score >= 80 ? 'bg-emerald-500' : health.score >= 50 ? 'bg-amber-400' : health.score > 0 ? 'bg-red-500' : 'bg-muted-foreground/20';
-  const textColor = health.score >= 80 ? 'text-emerald-400' : health.score >= 50 ? 'text-amber-400' : health.score > 0 ? 'text-red-400' : 'text-muted-foreground';
-  return (
-    <div className="space-y-2 p-3 rounded-xl border border-border bg-secondary/10">
-      <div className="flex items-center justify-between">
-        <span className="font-mono-console text-[9px] text-muted-foreground uppercase tracking-wider flex items-center gap-1.5">
-          <Activity size={10} /> Stream Health
-        </span>
-        <span className={cn('font-mono-console text-sm font-bold tabular-nums', textColor)}>{health.score}</span>
-      </div>
-      <div className="w-full h-2 bg-secondary rounded-full overflow-hidden">
-        <div className={cn('h-full rounded-full transition-all duration-500', color)} style={{ width: `${health.score}%` }} />
-      </div>
-      <div className="grid grid-cols-3 gap-2">
-        {[
-          { label: 'Bitrate', value: health.estimatedBitrate > 0 ? `${health.estimatedBitrate}k` : '—' },
-          { label: 'Status',  value: health.encoderStatus },
-          { label: 'Dropped', value: String(health.droppedFrames) },
-        ].map(m => (
-          <div key={m.label} className="text-center">
-            <p className="font-mono-console text-[8px] text-muted-foreground/50 uppercase">{m.label}</p>
-            <p className={cn('font-mono-console text-[10px] tabular-nums', textColor)}>{m.value}</p>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
+const MODES = [
+  { id: 'record', label: 'Record', icon: Circle, desc: 'Save to device' },
+  { id: 'folder', label: 'Folder', icon: Folder, desc: 'Save to folder' },
+  { id: 'whip', label: 'WHIP', icon: Wifi, desc: 'WebRTC stream' },
+  { id: 'rtmp', label: 'RTMP', icon: Radio, desc: 'Live stream' },
+] as const;
 
-export default function OutputPanel({ state, output, onOutputChange, onStart, onStop, duration }: OutputPanelProps) {
+const RESOLUTIONS = ['1280x720', '1920x1080', '854x480', '3840x2160'] as const;
+const BITRATES = [1500, 2500, 4000, 6000, 8000, 12000] as const;
+
+export default function OutputPanel({
+  state, output, onOutputChange, onStart, onStop, duration,
+  user, lastRecordingBlob, onClearRecording
+}: OutputPanelProps) {
   const { isLive, isRecording, health } = state;
   const isActive = isLive || isRecording;
-  const [showWhipInfo, setShowWhipInfo] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
-  const [fsSupported] = useState(() => 'showDirectoryPicker' in window);
+  const [uploadingCloud, setUploadingCloud] = useState(false);
+  const { uploadMedia } = useCloudStorage(user?.id ?? null);
 
-  const selectedPlatform = PLATFORMS.find(p => p.id === output.platform);
+  const SCORE_COLOR = health.score >= 80 ? 'text-emerald-400' : health.score >= 50 ? 'text-amber-400' : 'text-red-400';
+  const SCORE_BG = health.score >= 80 ? 'bg-emerald-500' : health.score >= 50 ? 'bg-amber-500' : 'bg-red-500';
+
+  async function handleUploadToCloud() {
+    if (!lastRecordingBlob || !user) {
+      if (!user) toast.error('Sign in to upload recordings to cloud');
+      return;
+    }
+    setUploadingCloud(true);
+    try {
+      const file = new File([lastRecordingBlob.blob], lastRecordingBlob.name, { type: 'video/webm' });
+      await uploadMedia(file, 'recording', 'recordings');
+      toast.success('Recording uploaded to cloud library');
+      onClearRecording?.();
+    } catch {
+      toast.error('Upload failed');
+    } finally {
+      setUploadingCloud(false);
+    }
+  }
 
   return (
     <div className="space-y-3">
-      <h3 className="font-mono-console text-[10px] uppercase tracking-widest text-muted-foreground">Output</h3>
-
-      {/* Mode selector */}
-      <div className="grid grid-cols-3 gap-1.5">
-        <button onClick={() => onOutputChange({ mode: 'record' })} disabled={isActive}
-          className={cn('flex flex-col items-center justify-center gap-1 py-2.5 rounded-xl border-2 font-mono-console text-[9px] transition-colors',
-            output.mode === 'record'
-              ? 'border-amber-500 bg-amber-500/10 text-amber-400'
-              : 'border-border text-muted-foreground hover:text-foreground disabled:opacity-40')}>
-          <HardDrive size={13} />Download
-        </button>
-        {fsSupported && (
-          <button onClick={() => onOutputChange({ mode: 'folder' })} disabled={isActive}
-            className={cn('flex flex-col items-center justify-center gap-1 py-2.5 rounded-xl border-2 font-mono-console text-[9px] transition-colors',
-              output.mode === 'folder'
-                ? 'border-cyan-500 bg-cyan-500/10 text-cyan-400'
-                : 'border-border text-muted-foreground hover:text-foreground disabled:opacity-40')}>
-            <FolderOpen size={13} />Folder
-          </button>
+      <div className="flex items-center justify-between">
+        <h3 className="font-mono-console text-[10px] uppercase tracking-widest text-muted-foreground flex items-center gap-1.5">
+          <Settings size={11} /> Output
+        </h3>
+        {isActive && (
+          <span className="font-mono-console text-[11px] font-bold tabular-nums text-red-400">{formatDur(duration)}</span>
         )}
-        <button onClick={() => onOutputChange({ mode: 'whip' })} disabled={isActive}
-          className={cn('flex flex-col items-center justify-center gap-1 py-2.5 rounded-xl border-2 font-mono-console text-[9px] transition-colors',
-            output.mode === 'whip'
-              ? 'border-red-500 bg-red-500/10 text-red-400'
-              : 'border-border text-muted-foreground hover:text-foreground disabled:opacity-40')}>
-          <Wifi size={13} />Go Live
-        </button>
       </div>
 
-      {/* Mode info banners */}
-      {output.mode === 'folder' && !isActive && (
-        <div className="p-3 rounded-xl border border-cyan-500/20 bg-cyan-500/5">
-          <p className="font-mono-console text-[10px] text-cyan-400 font-semibold">Direct Folder Save</p>
-          <p className="font-mono-console text-[10px] text-muted-foreground mt-1 leading-relaxed">
-            Click Start → choose folder → recording saves directly there in real-time, no download needed.
-          </p>
-        </div>
-      )}
-      {output.mode === 'record' && !isActive && (
-        <div className="p-3 rounded-xl border border-amber-500/20 bg-amber-500/5">
-          <p className="font-mono-console text-[10px] text-amber-400 font-semibold">Local Recording</p>
-          <p className="font-mono-console text-[10px] text-muted-foreground mt-1 leading-relaxed">
-            Records in browser memory and auto-downloads as .webm when stopped. No internet required.
-          </p>
+      {/* Mode selector */}
+      <div className="grid grid-cols-4 gap-1">
+        {MODES.map(m => {
+          const Icon = m.icon;
+          return (
+            <button key={m.id}
+              onClick={() => !isActive && onOutputChange({ mode: m.id })}
+              disabled={isActive}
+              className={cn(
+                'flex flex-col items-center gap-1 py-2.5 rounded-xl border font-mono-console text-[8px] transition-all',
+                output.mode === m.id
+                  ? 'border-primary bg-primary/15 text-primary shadow-[0_0_8px_rgba(var(--primary),0.2)]'
+                  : 'border-border text-muted-foreground hover:text-foreground disabled:opacity-50'
+              )}
+            >
+              <Icon size={13} />
+              {m.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Mode description */}
+      <p className="font-mono-console text-[9px] text-muted-foreground/50 text-center">
+        {MODES.find(m => m.id === output.mode)?.desc}
+        {output.mode === 'whip' && ' — requires WHIP relay endpoint'}
+        {output.mode === 'rtmp' && ' — requires nginx-rtmp or relay server'}
+      </p>
+
+      {/* WHIP settings */}
+      {output.mode === 'whip' && (
+        <div className="space-y-2">
+          <div>
+            <label className="font-mono-console text-[9px] text-muted-foreground uppercase block mb-1">WHIP Endpoint URL</label>
+            <input type="url" value={output.whipUrl} onChange={e => onOutputChange({ whipUrl: e.target.value })}
+              placeholder="https://your-whip-endpoint/..."
+              disabled={isActive}
+              className="w-full bg-input border border-border rounded-xl px-3 py-2 font-mono-console text-[10px] text-foreground placeholder:text-muted-foreground/30 focus:outline-none focus:border-primary disabled:opacity-50" />
+          </div>
+          <div>
+            <label className="font-mono-console text-[9px] text-muted-foreground uppercase block mb-1">Bearer Token (optional)</label>
+            <input type="password" value={output.streamKey} onChange={e => onOutputChange({ streamKey: e.target.value })}
+              placeholder="Optional auth token..."
+              disabled={isActive}
+              className="w-full bg-input border border-border rounded-xl px-3 py-2 font-mono-console text-[10px] text-foreground placeholder:text-muted-foreground/30 focus:outline-none focus:border-primary disabled:opacity-50" />
+          </div>
         </div>
       )}
 
-      {/* WHIP config */}
-      {output.mode === 'whip' && !isActive && (
+      {/* RTMP settings */}
+      {output.mode === 'rtmp' && (
         <div className="space-y-2">
-          <div className="flex gap-1">
-            {PLATFORMS.map(p => (
-              <button key={p.id} onClick={() => onOutputChange({ platform: p.id })}
-                className={cn('flex-1 py-1.5 rounded-lg font-mono-console text-[9px] uppercase tracking-wide border transition-colors',
-                  output.platform === p.id
-                    ? `border-current bg-current/10 ${p.color}`
-                    : 'border-border text-muted-foreground hover:text-foreground')}>
-                {p.label}
-              </button>
-            ))}
+          <div>
+            <label className="font-mono-console text-[9px] text-muted-foreground uppercase block mb-1">RTMP URL</label>
+            <input type="url" value={output.rtmpUrl} onChange={e => onOutputChange({ rtmpUrl: e.target.value })}
+              placeholder="rtmp://your-server/live"
+              disabled={isActive}
+              className="w-full bg-input border border-border rounded-xl px-3 py-2 font-mono-console text-[10px] text-foreground placeholder:text-muted-foreground/30 focus:outline-none focus:border-primary disabled:opacity-50" />
           </div>
           <div>
-            <div className="flex items-center justify-between mb-1">
-              <label className="font-mono-console text-[9px] text-muted-foreground uppercase">WHIP Endpoint</label>
-              <button onClick={() => setShowWhipInfo(v => !v)} className="text-muted-foreground hover:text-foreground"><Info size={11} /></button>
-            </div>
-            <input type="url" placeholder={selectedPlatform?.whipHint} value={output.whipUrl}
-              onChange={e => onOutputChange({ whipUrl: e.target.value })}
-              className="w-full bg-input border border-border rounded-lg px-3 py-2 font-mono-console text-[10px] text-foreground placeholder:text-muted-foreground/30 focus:outline-none focus:border-primary" />
+            <label className="font-mono-console text-[9px] text-muted-foreground uppercase block mb-1">Stream Key</label>
+            <input type="password" value={output.streamKey} onChange={e => onOutputChange({ streamKey: e.target.value })}
+              placeholder="xxxx-xxxx-xxxx-xxxx"
+              disabled={isActive}
+              className="w-full bg-input border border-border rounded-xl px-3 py-2 font-mono-console text-[10px] text-foreground placeholder:text-muted-foreground/30 focus:outline-none focus:border-primary disabled:opacity-50" />
           </div>
-          <div>
-            <label className="font-mono-console text-[9px] text-muted-foreground uppercase block mb-1">Stream Key / Bearer</label>
-            <input type="password" placeholder="Stream key..." value={output.streamKey}
-              onChange={e => onOutputChange({ streamKey: e.target.value })}
-              className="w-full bg-input border border-border rounded-lg px-3 py-2 font-mono-console text-[10px] text-foreground placeholder:text-muted-foreground/30 focus:outline-none focus:border-primary" />
+          <div className="p-2.5 rounded-xl border border-amber-500/20 bg-amber-500/5">
+            <p className="font-mono-console text-[9px] text-amber-400 leading-relaxed">
+              Browsers cannot send RTMP directly. A relay server (nginx-rtmp, Node-Media-Server) is required. Recording locally as fallback.
+            </p>
           </div>
-          {showWhipInfo && (
-            <div className="p-3 rounded-xl border border-blue-500/30 bg-blue-500/5 space-y-1.5">
-              <p className="font-mono-console text-[10px] text-blue-400 font-semibold">WHIP = Browser-native live streaming</p>
-              <p className="font-mono-console text-[10px] text-muted-foreground leading-relaxed">
-                Natively: Cloudflare Stream, Mux. For YouTube/Twitch/FB use a WHIP-to-RTMP relay.
-              </p>
-              <a href="https://github.com/Sean-Der/whip-to-rtmp" target="_blank" rel="noopener noreferrer"
-                className="font-mono-console text-[10px] text-blue-400 underline flex items-center gap-1">
-                whip-to-rtmp relay <ExternalLink size={9} />
-              </a>
-            </div>
-          )}
         </div>
       )}
 
       {/* Quality settings */}
-      {!isActive && (
-        <>
-          <button onClick={() => setShowSettings(v => !v)}
-            className="w-full flex items-center justify-between px-3 py-2 rounded-lg border border-border bg-secondary/20 hover:bg-secondary/40 transition-colors">
-            <span className="font-mono-console text-[10px] text-muted-foreground uppercase tracking-wider">Quality Settings</span>
-            {showSettings ? <ChevronUp size={12} className="text-muted-foreground" /> : <ChevronDown size={12} className="text-muted-foreground" />}
-          </button>
-          {showSettings && (
-            <div className="space-y-3 p-3 rounded-xl border border-border bg-secondary/10">
-              {/* Resolution */}
-              <div>
-                <label className="font-mono-console text-[9px] text-muted-foreground uppercase block mb-1">Resolution</label>
-                <div className="grid grid-cols-2 gap-1">
-                  {RESOLUTIONS.map(r => (
-                    <button key={r} onClick={() => onOutputChange({ resolution: r })}
-                      className={cn('py-1.5 rounded-lg border font-mono-console text-[9px] transition-colors',
-                        output.resolution === r
-                          ? 'border-primary bg-primary/10 text-primary'
-                          : 'border-border text-muted-foreground hover:text-foreground')}>
-                      {r.split('x')[0] === '3840' ? '4K UHD' : r.split('x')[0] === '1920' ? '1080p FHD' : r.split('x')[0] === '1280' ? '720p HD' : '480p'}
-                    </button>
-                  ))}
-                </div>
+      <div className="grid grid-cols-2 gap-2">
+        <div>
+          <label className="font-mono-console text-[9px] text-muted-foreground uppercase block mb-1">Resolution</label>
+          <select value={output.resolution} onChange={e => onOutputChange({ resolution: e.target.value as StreamOutput['resolution'] })}
+            disabled={isActive}
+            className="w-full bg-input border border-border rounded-xl px-2 py-2 font-mono-console text-[10px] text-foreground focus:outline-none disabled:opacity-50">
+            {RESOLUTIONS.map(r => <option key={r} value={r}>{r}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="font-mono-console text-[9px] text-muted-foreground uppercase block mb-1">Frame Rate</label>
+          <select value={output.fps} onChange={e => onOutputChange({ fps: Number(e.target.value) as 30 | 60 })}
+            disabled={isActive}
+            className="w-full bg-input border border-border rounded-xl px-2 py-2 font-mono-console text-[10px] text-foreground focus:outline-none disabled:opacity-50">
+            <option value={30}>30 FPS</option>
+            <option value={60}>60 FPS</option>
+          </select>
+        </div>
+      </div>
+
+      <div>
+        <div className="flex items-center justify-between mb-1">
+          <label className="font-mono-console text-[9px] text-muted-foreground uppercase">Bitrate</label>
+          <span className="font-mono-console text-[9px] text-foreground">{output.bitrate} kbps</span>
+        </div>
+        <div className="flex gap-1 flex-wrap">
+          {BITRATES.map(b => (
+            <button key={b} onClick={() => !isActive && onOutputChange({ bitrate: b })} disabled={isActive}
+              className={cn('px-2 py-1 rounded-lg border font-mono-console text-[8px] transition-colors disabled:opacity-50',
+                output.bitrate === b ? 'border-primary bg-primary/15 text-primary' : 'border-border text-muted-foreground hover:text-foreground')}>
+              {b >= 1000 ? `${b / 1000}M` : b + 'k'}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Stream health */}
+      {isActive && (
+        <div className="p-3 rounded-xl border border-border bg-secondary/10 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="font-mono-console text-[9px] text-muted-foreground uppercase tracking-wider">Stream Health</span>
+            <span className={cn('font-mono-console text-[10px] font-bold', SCORE_COLOR)}>{health.score}/100</span>
+          </div>
+          <div className="w-full h-2 bg-secondary rounded-full overflow-hidden">
+            <div className={cn('h-full rounded-full transition-all duration-1000', SCORE_BG)}
+              style={{ width: `${health.score}%` }} />
+          </div>
+          <div className="grid grid-cols-3 gap-1.5 text-center">
+            {[
+              { label: 'Bitrate', value: `${health.estimatedBitrate}k` },
+              { label: 'Status', value: health.encoderStatus.toUpperCase() },
+              { label: 'Time', value: formatDur(duration) },
+            ].map(({ label, value }) => (
+              <div key={label} className="px-2 py-1.5 rounded-lg bg-secondary/20">
+                <p className="font-mono-console text-[7px] text-muted-foreground/50 uppercase">{label}</p>
+                <p className="font-mono-console text-[9px] font-bold text-foreground">{value}</p>
               </div>
-              {/* Bitrate */}
-              <div>
-                <label className="font-mono-console text-[9px] text-muted-foreground uppercase block mb-1">Bitrate</label>
-                <div className="flex gap-1 flex-wrap">
-                  {BITRATES.map(b => (
-                    <button key={b.value} onClick={() => onOutputChange({ bitrate: b.value })}
-                      className={cn('flex-1 py-1.5 rounded-lg border font-mono-console text-[9px] transition-colors min-w-0',
-                        output.bitrate === b.value
-                          ? 'border-primary bg-primary/10 text-primary'
-                          : 'border-border text-muted-foreground hover:text-foreground')}>
-                      {b.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              {/* FPS */}
-              <div>
-                <label className="font-mono-console text-[9px] text-muted-foreground uppercase block mb-1">Frame Rate</label>
-                <div className="flex gap-1">
-                  {([30, 60] as const).map(fps => (
-                    <button key={fps} onClick={() => onOutputChange({ fps })}
-                      className={cn('flex-1 py-1.5 rounded-lg border font-mono-console text-[9px] transition-colors',
-                        output.fps === fps
-                          ? 'border-primary bg-primary/10 text-primary'
-                          : 'border-border text-muted-foreground hover:text-foreground')}>
-                      {fps} FPS
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-          )}
-        </>
+            ))}
+          </div>
+        </div>
       )}
 
-      {/* Stream health (while active) */}
-      {isActive && <HealthBar health={health} />}
-
       {/* Start / Stop */}
-      {!isActive ? (
-        <button onClick={onStart}
-          className={cn('w-full py-4 rounded-2xl font-mono-console text-sm font-bold tracking-widest transition-all active:scale-[0.98]',
-            output.mode === 'whip'
-              ? 'bg-red-600 hover:bg-red-700 text-white shadow-[0_0_20px_rgba(220,38,38,0.4)]'
-              : output.mode === 'folder'
-              ? 'bg-cyan-600 hover:bg-cyan-700 text-white shadow-[0_0_20px_rgba(6,182,212,0.3)]'
-              : 'bg-amber-600 hover:bg-amber-700 text-white shadow-[0_0_20px_rgba(245,158,11,0.3)]')}>
-          <div className="flex items-center justify-center gap-2.5">
-            {output.mode === 'whip'
-              ? <><Radio size={16} /> GO LIVE</>
-              : output.mode === 'folder'
-              ? <><FolderOpen size={15} /> RECORD TO FOLDER</>
-              : <><Circle size={14} className="fill-white" /> START RECORDING</>
-            }
-          </div>
+      {isActive ? (
+        <button onClick={onStop}
+          className="w-full flex items-center justify-center gap-2 py-4 rounded-xl border-2 border-red-500/60 bg-red-500/10 hover:bg-red-500/20 text-red-400 font-mono-console text-sm font-bold tracking-widest transition-all active:scale-[0.98]">
+          <Square size={16} />
+          STOP {isLive ? 'STREAM' : 'RECORDING'}
         </button>
       ) : (
-        <div className="space-y-2">
-          <div className={cn('flex items-center gap-2 px-4 py-2.5 rounded-xl border',
-            isLive ? 'border-red-500/50 bg-red-500/10' : 'border-amber-500/50 bg-amber-500/10')}>
-            <span className={cn('w-2 h-2 rounded-full animate-pulse', isLive ? 'bg-red-500' : 'bg-amber-500')} />
-            <span className={cn('font-mono-console text-xs font-bold flex-1', isLive ? 'text-red-400' : 'text-amber-400')}>
-              {isLive ? 'LIVE' : 'RECORDING'}
-            </span>
-            <span className="font-mono-console text-xs text-muted-foreground tabular-nums">{formatDur(duration)}</span>
+        <button onClick={onStart}
+          className={cn(
+            'w-full flex items-center justify-center gap-2 py-4 rounded-xl border-2 font-mono-console text-sm font-bold tracking-widest transition-all active:scale-[0.98]',
+            output.mode === 'whip' || output.mode === 'rtmp'
+              ? 'border-red-500/60 bg-red-500/10 hover:bg-red-500/20 text-red-400 shadow-[0_0_14px_rgba(220,38,38,0.2)]'
+              : 'border-emerald-500/60 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400'
+          )}>
+          <Circle size={16} className={output.mode === 'whip' || output.mode === 'rtmp' ? 'fill-red-500' : 'fill-emerald-500'} />
+          {output.mode === 'whip' ? 'GO LIVE (WHIP)' : output.mode === 'rtmp' ? 'GO LIVE (RTMP)' : 'START RECORDING'}
+        </button>
+      )}
+
+      {/* Cloud upload after recording */}
+      {lastRecordingBlob && !isActive && (
+        <div className="p-3 rounded-xl border border-blue-500/30 bg-blue-500/5 space-y-2">
+          <div className="flex items-center gap-2">
+            <CheckCircle size={13} className="text-emerald-400 shrink-0" />
+            <div className="flex-1 min-w-0">
+              <p className="font-mono-console text-[10px] font-semibold text-foreground">Recording ready</p>
+              <p className="font-mono-console text-[8px] text-muted-foreground truncate">{lastRecordingBlob.name}</p>
+            </div>
           </div>
-          <button onClick={onStop}
-            className="w-full py-3.5 rounded-2xl bg-secondary hover:bg-secondary/80 text-foreground font-mono-console text-sm font-bold border border-border transition-colors flex items-center justify-center gap-2">
-            <Square size={14} /> STOP
+          {user ? (
+            <button onClick={handleUploadToCloud} disabled={uploadingCloud}
+              className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl border border-blue-500/40 bg-blue-500/10 text-blue-400 font-mono-console text-[10px] font-bold hover:bg-blue-500/20 transition-colors disabled:opacity-50">
+              {uploadingCloud ? (
+                <><RefreshCw size={12} className="animate-spin" /> Uploading...</>
+              ) : (
+                <><Cloud size={12} /> Upload to Cloud Library</>
+              )}
+            </button>
+          ) : (
+            <div className="flex items-center gap-2">
+              <AlertCircle size={11} className="text-amber-400 shrink-0" />
+              <p className="font-mono-console text-[9px] text-amber-400">Sign in to upload recordings to cloud</p>
+            </div>
+          )}
+          <button onClick={onClearRecording}
+            className="w-full py-1.5 rounded-lg border border-border text-muted-foreground font-mono-console text-[9px] hover:text-foreground transition-colors">
+            Dismiss
           </button>
         </div>
       )}

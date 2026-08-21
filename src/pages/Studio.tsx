@@ -20,7 +20,6 @@ import MultiCameraGrid from '@/components/studio/MultiCameraGrid';
 import SceneHotkeys from '@/components/studio/SceneHotkeys';
 import RadioPanel from '@/components/studio/RadioPanel';
 import GuestLayoutPicker from '@/components/studio/GuestLayoutPicker';
-import MultiGuestGrid from '@/components/studio/MultiGuestGrid';
 import AutoDJScheduler, { ScheduledSlot } from '@/components/studio/AutoDJScheduler';
 import StreamDestinationManager, { StreamDestination } from '@/components/studio/StreamDestinationManager';
 import LowerThirdLibrary from '@/components/studio/LowerThirdLibrary';
@@ -29,7 +28,7 @@ import CloudMediaLibrary from '@/components/studio/CloudMediaLibrary';
 import {
   Radio, ArrowLeft, Monitor, Layers, Mic2, Settings, Clock,
   Tv, Zap, Scissors, Captions, Users, BarChart2, Music, Grid,
-  RadioTower, Cloud, MessageSquare, Layout
+  RadioTower, Cloud, MessageSquare, Layout, LogOut
 } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import { cn } from '@/lib/utils';
@@ -41,23 +40,23 @@ type Panel =
   | 'analytics' | 'autodj' | 'grid' | 'radio' | 'cloud' | 'chat' | 'graphics';
 
 const PANELS: { id: Panel; label: string; icon: React.ElementType }[] = [
-  { id: 'monitor',  label: 'Monitor',  icon: Monitor },
-  { id: 'grid',     label: 'Grid',     icon: Grid },
-  { id: 'scenes',   label: 'Scenes',   icon: Layers },
-  { id: 'audio',    label: 'Audio',    icon: Mic2 },
-  { id: 'autodj',   label: 'AutoDJ',   icon: Music },
-  { id: 'radio',    label: 'Radio',    icon: RadioTower },
-  { id: 'rundown',  label: 'Rundown',  icon: Clock },
-  { id: 'ads',      label: 'Ads',      icon: Tv },
-  { id: 'graphics', label: 'Graphics', icon: Layout },
-  { id: 'overlays', label: 'Overlay',  icon: Zap },
-  { id: 'chroma',   label: 'Chroma',   icon: Scissors },
-  { id: 'captions', label: 'Caption',  icon: Captions },
-  { id: 'guests',   label: 'Guests',   icon: Users },
-  { id: 'chat',     label: 'Chat',     icon: MessageSquare },
-  { id: 'cloud',    label: 'Cloud',    icon: Cloud },
-  { id: 'analytics',label: 'Analytics',icon: BarChart2 },
-  { id: 'output',   label: 'Output',   icon: Settings },
+  { id: 'monitor',   label: 'Monitor',   icon: Monitor },
+  { id: 'grid',      label: 'Grid',      icon: Grid },
+  { id: 'scenes',    label: 'Scenes',    icon: Layers },
+  { id: 'audio',     label: 'Audio',     icon: Mic2 },
+  { id: 'autodj',    label: 'AutoDJ',    icon: Music },
+  { id: 'radio',     label: 'Radio',     icon: RadioTower },
+  { id: 'rundown',   label: 'Rundown',   icon: Clock },
+  { id: 'ads',       label: 'Ads',       icon: Tv },
+  { id: 'graphics',  label: 'Graphics',  icon: Layout },
+  { id: 'overlays',  label: 'Overlay',   icon: Zap },
+  { id: 'chroma',    label: 'Chroma',    icon: Scissors },
+  { id: 'captions',  label: 'Caption',   icon: Captions },
+  { id: 'guests',    label: 'Guests',    icon: Users },
+  { id: 'chat',      label: 'Chat',      icon: MessageSquare },
+  { id: 'cloud',     label: 'Cloud',     icon: Cloud },
+  { id: 'analytics', label: 'Analytics', icon: BarChart2 },
+  { id: 'output',    label: 'Output',    icon: Settings },
 ];
 
 export default function Studio() {
@@ -65,15 +64,15 @@ export default function Studio() {
   const [adPlayingId, setAdPlayingId] = useState<string | null>(null);
   const [scheduleSlots, setScheduleSlots] = useState<ScheduledSlot[]>([]);
   const [destinations, setDestinations] = useState<StreamDestination[]>([]);
-  const [guestLink, setGuestLink] = useState('');
   const navigate = useNavigate();
-  const { user } = useAuth();
+  const { user, signOut } = useAuth();
 
   const engine = useStudioEngine();
   const {
-    state, cameras, cameraStream, pipStream, guestStream, facingMode, ticker, tickerVisible,
-    rundown, adSlots, analytics, autoDJ, playlists, hotkeys, guestLayout, listenerCount, stationName,
-    analyser,
+    state, cameras, cameraStream, pipStream, guestStream, facingMode,
+    ticker, tickerVisible, rundown, adSlots, analytics, autoDJ, playlists,
+    hotkeys, guestLayout, listenerCount, stationName, autoPilot, rundownCurrentIndex,
+    lastRecordingBlob, analyser,
     canvasRef, previewCanvasRef, videoElemRef, mediaVideoRef, mediaImageRef, pipVideoRef, guestVideoRef,
     startCamera, stopCamera, flipCamera, startPip, stopPip,
     switchScene, setPreviewScene, takeToProgram,
@@ -88,17 +87,18 @@ export default function Studio() {
     updateChromaKey, handleGuestStream,
     updateCaption, enableCaptions, disableCaptions,
     pinChatMessage, unpinChatMessage, toggleChatOverlay,
-    autoDJPlay, autoDJPause, autoDJSkip, autoDJSetMode, autoDJSetPlaylist,
+    autoDJPlay, autoDJPause, autoDJSkip, autoDJStop, autoDJSetMode, autoDJSetPlaylist,
     autoDJSetCrossfade, autoDJSetAdInterval, autoDJToggleAutoSwitch,
     addPlaylist, removePlaylist, addMediaToPlaylist, removeMediaFromPlaylist,
     setHotkeys, setGuestLayout, setListenerCount, setStationName,
-    replaceOverlays: replaceOverlaysEngine,
+    startAutoPilot, stopAutoPilot,
+    clearLastRecording,
   } = engine;
 
   const {
     isLive, isRecording, duration, scenes, currentSceneId, previewSceneId,
-    audioTracks, output, pip, transition, transitionDuration, chromaKey, captionsEnabled, health,
-    chatOverlayEnabled, pinnedChatMessage,
+    audioTracks, output, pip, transition, transitionDuration, chromaKey,
+    captionsEnabled, health, chatOverlayEnabled, pinnedChatMessage,
   } = state;
 
   const currentScene = scenes.find(s => s.id === currentSceneId);
@@ -114,6 +114,7 @@ export default function Studio() {
     if (ad.mediaUrl !== '__text__' && mediaVideoRef.current) {
       mediaVideoRef.current.src = ad.mediaUrl;
       mediaVideoRef.current.loop = false;
+      mediaVideoRef.current.playbackRate = 1.0;
       mediaVideoRef.current.play().catch(() => {});
       mediaVideoRef.current.onended = () => setAdPlayingId(null);
     }
@@ -126,41 +127,38 @@ export default function Studio() {
 
   function handleLoadCloudMedia(url: string, type: 'video' | 'image' | 'audio', name: string) {
     if (type === 'video') {
-      const videoScene = scenes.find(s => s.sourceType === 'video');
+      const videoScene = scenes.find(s => s.sourceType === 'video') || scenes.find(s => s.id === currentSceneId);
       loadMedia(videoScene?.id || currentSceneId, url, 'video');
     } else if (type === 'image') {
-      const imageScene = scenes.find(s => s.sourceType === 'image');
+      const imageScene = scenes.find(s => s.sourceType === 'image') || scenes.find(s => s.id === currentSceneId);
       loadMedia(imageScene?.id || currentSceneId, url, 'image');
     }
   }
 
-  function handleApplyLowerThird(overlays: Parameters<typeof addOverlay>[1][]) {
-    if (currentScene) {
-      replaceOverlays(currentScene.id, overlays);
+  function handleAddCloudToPlaylist(url: string, title: string, type: 'music' | 'video' | 'ad') {
+    if (playlists.length > 0) {
+      addMediaToPlaylist(playlists[0].id, { title, url, type, duration: 0, dateAdded: Date.now(), usageCount: 0 });
+    } else {
+      const id = addPlaylist({ name: 'Cloud Media', items: [], mode: 'sequential', icon: '☁️' });
+      // Add after playlist is created
+      setTimeout(() => {
+        addMediaToPlaylist(id, { title, url, type, duration: 0, dateAdded: Date.now(), usageCount: 0 });
+      }, 100);
     }
+  }
+
+  function handleApplyLowerThird(overlays: Parameters<typeof addOverlay>[1][]) {
+    if (currentScene) replaceOverlays(currentScene.id, overlays);
   }
 
   function handlePinChatMessage(msg: ChatMessage) {
     pinChatMessage({ author: msg.author, text: msg.text });
   }
 
-  // Guest management
-  const [guestList, setGuestList] = useState<{
-    id: string; name: string; stream: MediaStream | null; connected: boolean; muted: boolean; onAir: boolean;
-  }[]>([]);
-
-  function handleCreateGuestLink() {
-    const guestId = `g-${Math.random().toString(36).slice(2, 9)}`;
-    const link = `${window.location.origin}/guest?id=${guestId}&ch=studio-guest-signal`;
-    setGuestLink(link);
-    navigator.clipboard?.writeText(link).then(() => {}).catch(() => {});
-    return guestId;
-  }
-
   return (
     <div className="min-h-screen flex flex-col bg-[hsl(220,25%,3%)] overflow-x-hidden">
 
-      {/* ── Top bar ──────────────────────────────────────────────────── */}
+      {/* ── Top bar ─────────────────────────────────────────────────── */}
       <header className="h-12 flex items-center px-3 border-b border-border/50 bg-[hsl(220,22%,5%)] shrink-0 gap-3">
         <Link to="/" className="w-8 h-8 flex items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors shrink-0">
           <ArrowLeft size={15} />
@@ -175,7 +173,7 @@ export default function Studio() {
 
         {/* Tally lights */}
         <div className="flex-1 flex items-center justify-center gap-1.5 overflow-x-auto no-scrollbar">
-          {scenes.slice(0, 12).map(scene => (
+          {scenes.slice(0, 14).map(scene => (
             <div key={scene.id} className="flex flex-col items-center gap-0.5 shrink-0">
               <div className={cn('w-2.5 h-2.5 rounded-full border transition-all',
                 scene.id === currentSceneId
@@ -191,30 +189,30 @@ export default function Studio() {
           ))}
         </div>
 
-        {/* Right status zone */}
+        {/* Status indicators */}
         <div className="flex items-center gap-1.5 shrink-0">
           <SceneHotkeys
-            scenes={scenes}
-            hotkeys={hotkeys}
-            onSwitch={switchScene}
-            onTakeToProgram={takeToProgram}
-            onUpdateHotkeys={setHotkeys}
+            scenes={scenes} hotkeys={hotkeys}
+            onSwitch={switchScene} onTakeToProgram={takeToProgram} onUpdateHotkeys={setHotkeys}
           />
+          {autoPilot && (
+            <span className="hidden sm:flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 font-mono-console text-[8px] text-emerald-400">
+              <span className="w-1 h-1 rounded-full bg-emerald-400 animate-pulse" />AUTO
+            </span>
+          )}
           {chromaKey.enabled && (
             <span className="hidden sm:flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 font-mono-console text-[8px] text-emerald-400">CK</span>
           )}
-          {captionsEnabled && (
-            <span className="hidden sm:flex items-center gap-1 px-2 py-0.5 rounded-full bg-blue-500/10 border border-blue-500/20 font-mono-console text-[8px] text-blue-400">CC</span>
-          )}
           {autoDJ.status === 'playing' && (
             <span className="hidden sm:flex items-center gap-1 px-2 py-0.5 rounded-full bg-purple-500/10 border border-purple-500/20 font-mono-console text-[8px] text-purple-400">
-              <span className="w-1.5 h-1.5 rounded-full bg-purple-400 animate-pulse" />DJ
+              <span className="w-1 h-1 rounded-full bg-purple-400 animate-pulse" />DJ
             </span>
           )}
           {user && (
-            <span className="hidden sm:flex items-center gap-1 px-2 py-0.5 rounded-full bg-blue-500/10 border border-blue-500/20 font-mono-console text-[8px] text-blue-400">
+            <button onClick={signOut} title="Sign out"
+              className="hidden sm:flex items-center gap-1 px-2 py-0.5 rounded-full bg-blue-500/10 border border-blue-500/20 font-mono-console text-[8px] text-blue-400 hover:bg-blue-500/20 transition-colors">
               <Cloud size={8} />
-            </span>
+            </button>
           )}
           {isLive && (
             <span className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-red-500/10 border border-red-500/30 font-mono-console text-[9px] text-red-400 font-bold animate-pulse">
@@ -232,10 +230,10 @@ export default function Studio() {
         </div>
       </header>
 
-      {/* ── Main layout ───────────────────────────────────────────────── */}
+      {/* ── Main layout ──────────────────────────────────────────────── */}
       <main className="flex-1 flex flex-col lg:flex-row overflow-hidden">
 
-        {/* ── Left: Program/Preview + quick rail ───────────────────── */}
+        {/* ── Left: Monitors + quick rail ─────────────────────────── */}
         <div className="lg:flex-1 flex flex-col overflow-hidden">
           <div className="p-2.5 lg:p-3 space-y-2.5 shrink-0">
             {/* Dual monitors */}
@@ -270,12 +268,12 @@ export default function Studio() {
                 >
                   <span className="mr-1">{scene.icon}</span>
                   {scene.name.length > 6 ? scene.name.slice(0, 6) : scene.name}
-                  {idx < 9 && <span className="ml-1 font-mono-console text-[7px] opacity-30">{idx + 1}</span>}
+                  {idx < 9 && <span className="ml-1 opacity-30 text-[7px]">{idx + 1}</span>}
                 </button>
               ))}
             </div>
             <p className="font-mono-console text-[7px] text-muted-foreground/30 text-center">
-              Tap → Preview  ·  Double-tap → Program  ·  Keys 1–9 = scenes  ·  Space = CUT
+              Tap → Preview · Double-tap → Program · Keys 1–9 = scenes · Space = CUT
             </p>
           </div>
 
@@ -284,32 +282,13 @@ export default function Studio() {
             {activePanel === 'audio' && (
               <StudioMixer tracks={audioTracks} onVolume={setTrackVolume} onMute={toggleTrackMute} analyser={analyser} />
             )}
-            {activePanel === 'overlays' && (
-              <div className="space-y-4">
-                <OverlayEditor scene={currentScene} onAdd={addOverlay} onUpdate={updateOverlay} onRemove={removeOverlay} />
-                <div className="border-t border-border pt-4">
-                  <TickerEditor ticker={ticker} tickerVisible={tickerVisible} onShow={showTicker} onHide={hideTicker} />
-                </div>
-              </div>
-            )}
             {activePanel === 'analytics' && (
               <AnalyticsDashboard analytics={analytics} sceneNames={sceneNames} isLive={isActive} />
-            )}
-            {activePanel === 'autodj' && (
-              <AutoDJPanel
-                autoDJ={autoDJ} playlists={playlists}
-                onPlay={autoDJPlay} onPause={autoDJPause} onSkip={autoDJSkip}
-                onSetMode={autoDJSetMode} onSetPlaylist={autoDJSetPlaylist}
-                onAddPlaylist={addPlaylist} onRemovePlaylist={removePlaylist}
-                onAddMediaToPlaylist={addMediaToPlaylist} onRemoveMediaFromPlaylist={removeMediaFromPlaylist}
-                onSetCrossfade={autoDJSetCrossfade} onSetAdInterval={autoDJSetAdInterval}
-                onToggleAutoSwitchLive={autoDJToggleAutoSwitch}
-              />
             )}
           </div>
         </div>
 
-        {/* ── Right: Control panel ────────────────────────────────────── */}
+        {/* ── Right: Control panels ────────────────────────────────── */}
         <div className="lg:w-[380px] xl:w-[420px] flex flex-col border-t lg:border-t-0 lg:border-l border-border/50 bg-[hsl(220,20%,6%)] shrink-0">
 
           {/* Panel tabs */}
@@ -318,9 +297,11 @@ export default function Studio() {
               const Icon = panel.icon;
               const hasIndicator =
                 (panel.id === 'autodj' && autoDJ.status === 'playing') ||
-                (panel.id === 'guests' && guestList.some(g => g.connected)) ||
+                (panel.id === 'guests' && guestStream !== null) ||
                 (panel.id === 'chat' && !!pinnedChatMessage) ||
-                (panel.id === 'cloud' && !!user);
+                (panel.id === 'cloud' && !!user) ||
+                (panel.id === 'rundown' && autoPilot) ||
+                (panel.id === 'output' && !!lastRecordingBlob);
               return (
                 <button
                   key={panel.id}
@@ -376,7 +357,8 @@ export default function Studio() {
                 onSwitch={switchScene} onPreview={setPreviewScene}
                 onAdd={addScene} onDelete={deleteScene} onUpdate={updateScene}
                 onCaptureThumbnail={captureSceneThumbnail}
-                pip={pip} onPipChange={setPip} onStartPip={startPip} onStopPip={stopPip} pipActive={!!pipStream}
+                pip={pip} onPipChange={setPip} onStartPip={startPip} onStopPip={stopPip}
+                pipActive={!!pipStream}
               />
             )}
 
@@ -388,7 +370,7 @@ export default function Studio() {
               <div className="space-y-4">
                 <AutoDJPanel
                   autoDJ={autoDJ} playlists={playlists}
-                  onPlay={autoDJPlay} onPause={autoDJPause} onSkip={autoDJSkip}
+                  onPlay={autoDJPlay} onPause={autoDJPause} onSkip={autoDJSkip} onStop={autoDJStop}
                   onSetMode={autoDJSetMode} onSetPlaylist={autoDJSetPlaylist}
                   onAddPlaylist={addPlaylist} onRemovePlaylist={removePlaylist}
                   onAddMediaToPlaylist={addMediaToPlaylist} onRemoveMediaFromPlaylist={removeMediaFromPlaylist}
@@ -409,23 +391,27 @@ export default function Studio() {
             {activePanel === 'radio' && (
               <RadioPanel
                 autoDJ={autoDJ} health={health} isLive={isLive} isRecording={isRecording}
-                duration={duration} listenerCount={listenerCount} onSetListenerCount={setListenerCount}
+                duration={duration} listenerCount={listenerCount}
+                onSetListenerCount={setListenerCount}
                 stationName={stationName} onSetStationName={setStationName}
               />
             )}
 
             {activePanel === 'rundown' && (
               <RundownPanel
-                rundown={rundown} scenes={scenes} currentSceneId={currentSceneId} isLive={isActive}
+                rundown={rundown} scenes={scenes} currentSceneId={currentSceneId}
+                isLive={isActive} autoPilot={autoPilot} rundownCurrentIndex={rundownCurrentIndex}
                 onAdd={addRundownSegment} onRemove={removeRundownSegment} onUpdate={updateRundownSegment}
                 onSwitchToScene={switchScene}
+                onStartAutoPilot={startAutoPilot} onStopAutoPilot={stopAutoPilot}
               />
             )}
 
             {activePanel === 'ads' && (
               <AdManager
                 adSlots={adSlots} onAdd={addAdSlot} onRemove={removeAdSlot}
-                onPlayAd={handlePlayAd} isPlaying={!!adPlayingId} playingId={adPlayingId} onStopAd={handleStopAd}
+                onPlayAd={handlePlayAd} isPlaying={!!adPlayingId}
+                playingId={adPlayingId} onStopAd={handleStopAd}
               />
             )}
 
@@ -494,6 +480,7 @@ export default function Studio() {
                 user={user}
                 onLoadToScene={handleLoadCloudMedia}
                 onSignIn={() => navigate('/auth')}
+                onAddToPlaylist={handleAddCloudToPlaylist}
               />
             )}
 
@@ -506,6 +493,9 @@ export default function Studio() {
                 <OutputPanel
                   state={state} output={output} onOutputChange={setOutput}
                   onStart={startOutput} onStop={stopOutput} duration={duration}
+                  user={user}
+                  lastRecordingBlob={lastRecordingBlob}
+                  onClearRecording={clearLastRecording}
                 />
                 <div className="border-t border-border/50 pt-4">
                   <StreamDestinationManager
@@ -519,6 +509,7 @@ export default function Studio() {
                 </div>
               </div>
             )}
+
           </div>
         </div>
       </main>

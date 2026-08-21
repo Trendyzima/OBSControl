@@ -77,7 +77,7 @@ const DEFAULT_SCENES: StudioScene[] = [
 const DEFAULT_AUDIO: AudioTrack[] = [
   { id: 'mic', name: 'Microphone', type: 'mic', volume: 85, muted: false, level: 0 },
   { id: 'vid-audio', name: 'Video Audio', type: 'video', volume: 100, muted: false, level: 0 },
-  { id: 'music', name: 'Background Music', type: 'music', volume: 30, muted: true, level: 0 },
+  { id: 'music', name: 'Background Music', type: 'music', volume: 70, muted: false, level: 0 },
 ];
 
 const DEFAULT_OUTPUT: StreamOutput = {
@@ -137,11 +137,10 @@ function applyChromaKey(ctx: CanvasRenderingContext2D, w: number, h: number, col
   ctx.putImageData(imageData, 0, 0);
 }
 
-// Best supported MIME type for smooth recording
 function getBestMimeType(): string {
   const candidates = [
-    'video/webm;codecs=vp9,opus',
     'video/webm;codecs=vp8,opus',
+    'video/webm;codecs=vp9,opus',
     'video/webm;codecs=h264,opus',
     'video/webm',
   ];
@@ -184,6 +183,13 @@ export function useStudioEngine() {
   const [listenerCount, setListenerCount] = useState(0);
   const [stationName, setStationName] = useState('My Radio Station');
 
+  // Automation state
+  const [autoPilot, setAutoPilot] = useState(false);
+  const [rundownCurrentIndex, setRundownCurrentIndex] = useState(0);
+
+  // Recording cloud upload state
+  const [lastRecordingBlob, setLastRecordingBlob] = useState<{ blob: Blob; name: string } | null>(null);
+
   // Refs
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -193,6 +199,7 @@ export function useStudioEngine() {
   const mediaImageRef = useRef<HTMLImageElement | null>(null);
   const pipVideoRef = useRef<HTMLVideoElement | null>(null);
   const guestVideoRef = useRef<HTMLVideoElement | null>(null);
+  // AutoDJ audio element — created once, reused
   const autoDJAudioRef = useRef<HTMLAudioElement | null>(null);
 
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -226,12 +233,24 @@ export function useStudioEngine() {
   const autoDJRef = useRef<AutoDJState>(autoDJ);
   const playlistsRef = useRef<Playlist[]>(playlists);
   const chatOverlayEnabledRef = useRef(chatOverlayEnabled);
+  const autoPilotRef = useRef(autoPilot);
+  const rundownRef = useRef<RundownSegment[]>(rundown);
+  const rundownIndexRef = useRef(rundownCurrentIndex);
+  const autoPilotTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Stream recovery
+  const whipPcRef = useRef<RTCPeerConnection | null>(null);
+  const streamRecoveryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const streamRecoveryAttemptsRef = useRef(0);
+  const programStreamRef = useRef<MediaStream | null>(null);
 
   scenesRef.current = scenes;
   currentSceneIdRef.current = currentSceneId;
   autoDJRef.current = autoDJ;
   playlistsRef.current = playlists;
   chatOverlayEnabledRef.current = chatOverlayEnabled;
+  autoPilotRef.current = autoPilot;
+  rundownRef.current = rundown;
+  rundownIndexRef.current = rundownCurrentIndex;
 
   // ── Enumerate cameras ─────────────────────────────────────────────────────
   const enumerateCameras = useCallback(async () => {
@@ -256,8 +275,16 @@ export function useStudioEngine() {
       if (!destRef.current) destRef.current = ctx.createMediaStreamDestination();
       if (!micGainRef.current) { micGainRef.current = ctx.createGain(); micGainRef.current.connect(destRef.current); }
       if (!vidGainRef.current) { vidGainRef.current = ctx.createGain(); vidGainRef.current.connect(destRef.current); }
-      if (!musicGainRef.current) { musicGainRef.current = ctx.createGain(); musicGainRef.current.gain.value = 0.3; musicGainRef.current.connect(destRef.current); }
-      if (!analyserRef.current) { analyserRef.current = ctx.createAnalyser(); analyserRef.current.fftSize = 2048; }
+      if (!musicGainRef.current) {
+        musicGainRef.current = ctx.createGain();
+        musicGainRef.current.gain.value = 0.7;
+        musicGainRef.current.connect(destRef.current);
+      }
+      if (!analyserRef.current) {
+        analyserRef.current = ctx.createAnalyser();
+        analyserRef.current.fftSize = 2048;
+        analyserRef.current.connect(ctx.destination);
+      }
       if (stream) {
         if (micSourceRef.current) { try { micSourceRef.current.disconnect(); } catch {} }
         micSourceRef.current = ctx.createMediaStreamSource(stream);
@@ -265,6 +292,30 @@ export function useStudioEngine() {
         micSourceRef.current.connect(analyserRef.current);
       }
     } catch (err) { console.error('Audio init:', err); }
+  }, []);
+
+  // ── Setup AutoDJ audio element on first mount ─────────────────────────────
+  const ensureAutoDJAudio = useCallback(() => {
+    if (!autoDJAudioRef.current) {
+      const audio = new Audio();
+      audio.crossOrigin = 'anonymous';
+      audio.preload = 'auto';
+      autoDJAudioRef.current = audio;
+    }
+    // Connect to audio context if not already done
+    if (autoDJAudioRef.current && audioCtxRef.current && !autoDJSourceRef.current) {
+      try {
+        autoDJSourceRef.current = audioCtxRef.current.createMediaElementSource(autoDJAudioRef.current);
+        if (musicGainRef.current) {
+          autoDJSourceRef.current.connect(musicGainRef.current);
+        } else {
+          autoDJSourceRef.current.connect(audioCtxRef.current.destination);
+        }
+      } catch {
+        // Already connected or error — ignore
+      }
+    }
+    return autoDJAudioRef.current;
   }, []);
 
   const syncAudioGains = useCallback(() => {
@@ -294,13 +345,15 @@ export function useStudioEngine() {
       setFacingMode(fm);
       if (videoElemRef.current) {
         videoElemRef.current.srcObject = stream;
+        // Critical: ensure playback rate is 1.0 (no slow motion)
+        videoElemRef.current.playbackRate = 1.0;
         videoElemRef.current.play().catch(() => {});
       }
       await initAudio(stream);
       await enumerateCameras();
       const track = stream.getVideoTracks()[0];
       const settings = track.getSettings();
-      toast.success(`Camera: ${settings.width}x${settings.height} (${fm === 'environment' ? 'Rear' : 'Front'})`);
+      toast.success(`Camera: ${settings.width}x${settings.height} @ ${settings.frameRate}fps`);
       return stream;
     } catch {
       try {
@@ -309,7 +362,11 @@ export function useStudioEngine() {
           audio: { echoCancellation: true, noiseSuppression: true },
         });
         setCameraStream(fallback);
-        if (videoElemRef.current) { videoElemRef.current.srcObject = fallback; videoElemRef.current.play().catch(() => {}); }
+        if (videoElemRef.current) {
+          videoElemRef.current.srcObject = fallback;
+          videoElemRef.current.playbackRate = 1.0;
+          videoElemRef.current.play().catch(() => {});
+        }
         await initAudio(fallback);
         toast.success('Camera started (1080p)');
         return fallback;
@@ -341,7 +398,11 @@ export function useStudioEngine() {
       }
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       setPipStream(stream);
-      if (pipVideoRef.current) { pipVideoRef.current.srcObject = stream; pipVideoRef.current.play().catch(() => {}); }
+      if (pipVideoRef.current) {
+        pipVideoRef.current.srcObject = stream;
+        pipVideoRef.current.playbackRate = 1.0;
+        pipVideoRef.current.play().catch(() => {});
+      }
       setPip(p => ({ ...p, enabled: true }));
       toast.success('PiP camera started');
     } catch { toast.error('Could not start PiP camera'); }
@@ -362,33 +423,83 @@ export function useStudioEngine() {
   const handleGuestStream = useCallback((stream: MediaStream | null, _guestId: string) => {
     setGuestStream(stream);
     if (guestVideoRef.current) {
-      if (stream) { guestVideoRef.current.srcObject = stream; guestVideoRef.current.play().catch(() => {}); }
-      else guestVideoRef.current.srcObject = null;
+      if (stream) {
+        guestVideoRef.current.srcObject = stream;
+        guestVideoRef.current.playbackRate = 1.0;
+        guestVideoRef.current.play().catch(() => {});
+      } else guestVideoRef.current.srcObject = null;
     }
   }, []);
+
+  // ── Preload upcoming scenes ───────────────────────────────────────────────
+  const preloadedUrlsRef = useRef<Set<string>>(new Set());
+
+  const preloadScenes = useCallback((sceneIds: string[]) => {
+    sceneIds.forEach(sceneId => {
+      const scene = scenesRef.current.find(s => s.id === sceneId);
+      if (!scene) return;
+      if (scene.sourceType === 'video' && scene.mediaUrl && !preloadedUrlsRef.current.has(scene.mediaUrl)) {
+        preloadedUrlsRef.current.add(scene.mediaUrl);
+        const preloadEl = document.createElement('video');
+        preloadEl.preload = 'auto';
+        preloadEl.muted = true;
+        preloadEl.src = scene.mediaUrl;
+        preloadEl.load();
+        // Load first 3s to buffer it
+        preloadEl.addEventListener('canplay', () => {
+          console.log(`[Preload] Buffered: ${scene.name}`);
+        }, { once: true });
+      } else if (scene.sourceType === 'image' && scene.imageUrl && !preloadedUrlsRef.current.has(scene.imageUrl)) {
+        preloadedUrlsRef.current.add(scene.imageUrl);
+        const img = new Image();
+        img.src = scene.imageUrl;
+      }
+    });
+  }, []);
+
+  // Preload next 2 scenes whenever rundown changes
+  useEffect(() => {
+    if (rundown.length === 0) return;
+    const currentIdx = rundown.findIndex(s => s.status === 'live');
+    const nextIds = rundown.slice(currentIdx + 1, currentIdx + 3).map(s => s.sceneId);
+    preloadScenes(nextIds);
+  }, [rundown, preloadScenes]);
 
   // ── AutoDJ engine ─────────────────────────────────────────────────────────
   const autoDJPlayNext = useCallback(() => {
     const dj = autoDJRef.current;
     const pls = playlistsRef.current;
-    if (!dj.currentPlaylistId) return;
+    if (!dj.currentPlaylistId) {
+      toast.error('AutoDJ: Select a playlist first');
+      return;
+    }
     const pl = pls.find(p => p.id === dj.currentPlaylistId);
-    if (!pl || pl.items.length === 0) return;
+    if (!pl || pl.items.length === 0) {
+      toast.error('AutoDJ: Playlist is empty — upload tracks in the Playlists tab');
+      return;
+    }
 
     const adItems = pl.items.filter(i => i.type === 'ad');
     if (dj.songsUntilAd <= 0 && adItems.length > 0) {
       const ad = adItems[Math.floor(Math.random() * adItems.length)];
       setAutoDJ(prev => ({ ...prev, currentItem: ad, nextItem: null, songsUntilAd: prev.adInterval, status: 'playing' }));
-      if (autoDJAudioRef.current) {
-        autoDJAudioRef.current.src = ad.url;
-        autoDJAudioRef.current.play().catch(() => {});
-        autoDJAudioRef.current.onended = () => autoDJPlayNext();
+      const audio = ensureAutoDJAudio();
+      if (audio) {
+        audio.src = ad.url;
+        audio.load();
+        audio.play().catch(e => console.error('AutoDJ ad play error:', e));
+        audio.onended = () => {
+          if (autoDJRef.current.mode === 'automatic' && autoDJRef.current.status === 'playing') autoDJPlayNext();
+        };
       }
       return;
     }
 
     const musicItems = pl.items.filter(i => i.type !== 'ad');
-    if (musicItems.length === 0) return;
+    if (musicItems.length === 0) {
+      toast.error('AutoDJ: No music tracks — add music in the Playlists tab');
+      return;
+    }
 
     let idx = dj.currentIndex;
     if (pl.mode === 'shuffle') idx = Math.floor(Math.random() * musicItems.length);
@@ -401,54 +512,85 @@ export function useStudioEngine() {
       currentItem: item,
       nextItem,
       currentIndex: idx + 1,
-      songsUntilAd: prev.songsUntilAd - 1,
+      songsUntilAd: Math.max(0, prev.songsUntilAd - 1),
       status: 'playing',
     }));
 
-    if (autoDJAudioRef.current) {
-      autoDJAudioRef.current.src = item.url;
-      autoDJAudioRef.current.play().catch(() => {});
-      autoDJAudioRef.current.onended = () => {
+    const audio = ensureAutoDJAudio();
+    if (audio) {
+      audio.src = item.url;
+      audio.load();
+      audio.play().catch(e => {
+        console.error('AutoDJ play error:', e);
+        toast.error('AutoDJ: Could not play track — check browser audio permissions');
+      });
+      audio.onended = () => {
         if (autoDJRef.current.mode === 'automatic' && autoDJRef.current.status === 'playing') {
           autoDJPlayNext();
         }
       };
     }
-  }, []);
+  }, [ensureAutoDJAudio]);
 
-  const autoDJPlay = useCallback(() => {
+  const autoDJPlay = useCallback(async () => {
+    // Must create/resume audio context inside user gesture
     if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
     const ctx = audioCtxRef.current;
-    if (ctx.state === 'suspended') ctx.resume();
+    if (ctx.state === 'suspended') await ctx.resume();
+
     if (!destRef.current) destRef.current = ctx.createMediaStreamDestination();
-    if (!musicGainRef.current) { musicGainRef.current = ctx.createGain(); musicGainRef.current.connect(destRef.current); }
-    if (!autoDJAudioRef.current) {
-      autoDJAudioRef.current = new Audio();
-      autoDJAudioRef.current.crossOrigin = 'anonymous';
+    if (!musicGainRef.current) {
+      musicGainRef.current = ctx.createGain();
+      musicGainRef.current.gain.value = 0.7;
+      musicGainRef.current.connect(destRef.current);
+      musicGainRef.current.connect(ctx.destination); // Also output to speakers
     }
-    if (!autoDJSourceRef.current && autoDJAudioRef.current) {
+
+    // Create audio element and connect
+    const audio = ensureAutoDJAudio();
+    if (autoDJSourceRef.current === null && audio) {
       try {
-        autoDJSourceRef.current = ctx.createMediaElementSource(autoDJAudioRef.current);
+        autoDJSourceRef.current = ctx.createMediaElementSource(audio);
         autoDJSourceRef.current.connect(musicGainRef.current);
-      } catch { /* already connected */ }
+      } catch {
+        // Already connected — safe to ignore
+      }
     }
+
+    const dj = autoDJRef.current;
+    if (dj.status === 'paused' && audio && audio.paused && audio.src) {
+      // Resume paused track
+      audio.play().catch(e => console.error('Resume error:', e));
+      setAutoDJ(prev => ({ ...prev, status: 'playing', enabled: true }));
+      return;
+    }
+
     setAutoDJ(prev => ({ ...prev, enabled: true, status: 'playing' }));
     autoDJPlayNext();
-    toast.success('AutoDJ started');
-  }, [autoDJPlayNext]);
+  }, [ensureAutoDJAudio, autoDJPlayNext]);
 
   const autoDJPause = useCallback(() => {
-    if (autoDJAudioRef.current) autoDJAudioRef.current.pause();
+    const audio = autoDJAudioRef.current;
+    if (audio) audio.pause();
     setAutoDJ(prev => ({ ...prev, status: 'paused' }));
   }, []);
 
   const autoDJSkip = useCallback(() => {
-    if (autoDJAudioRef.current) { autoDJAudioRef.current.pause(); autoDJAudioRef.current.onended = null; }
+    const audio = autoDJAudioRef.current;
+    if (audio) { audio.pause(); audio.onended = null; }
     autoDJPlayNext();
   }, [autoDJPlayNext]);
 
+  const autoDJStop = useCallback(() => {
+    const audio = autoDJAudioRef.current;
+    if (audio) { audio.pause(); audio.src = ''; audio.onended = null; }
+    setAutoDJ(prev => ({ ...prev, status: 'idle', enabled: false, currentItem: null, nextItem: null }));
+  }, []);
+
   const autoDJSetMode = useCallback((mode: AutoDJMode) => setAutoDJ(prev => ({ ...prev, mode })), []);
-  const autoDJSetPlaylist = useCallback((id: string) => setAutoDJ(prev => ({ ...prev, currentPlaylistId: id, currentIndex: 0 })), []);
+  const autoDJSetPlaylist = useCallback((id: string) => {
+    setAutoDJ(prev => ({ ...prev, currentPlaylistId: id, currentIndex: 0 }));
+  }, []);
   const autoDJSetCrossfade = useCallback((secs: number) => setAutoDJ(prev => ({ ...prev, crossfadeDuration: secs })), []);
   const autoDJSetAdInterval = useCallback((n: number) => setAutoDJ(prev => ({ ...prev, adInterval: n, songsUntilAd: n })), []);
   const autoDJToggleAutoSwitch = useCallback(() => setAutoDJ(prev => ({ ...prev, autoSwitchToLive: !prev.autoSwitchToLive })), []);
@@ -465,9 +607,67 @@ export function useStudioEngine() {
   const addMediaToPlaylist = useCallback((playlistId: string, item: Omit<MediaItem, 'id'>) => {
     const newItem: MediaItem = { ...item, id: `mi-${Date.now()}-${Math.random().toString(36).slice(2, 6)}` };
     setPlaylists(prev => prev.map(p => p.id === playlistId ? { ...p, items: [...p.items, newItem] } : p));
+    toast.success(`Added to playlist: ${item.title}`);
   }, []);
   const removeMediaFromPlaylist = useCallback((playlistId: string, itemId: string) => {
     setPlaylists(prev => prev.map(p => p.id === playlistId ? { ...p, items: p.items.filter(i => i.id !== itemId) } : p));
+  }, []);
+
+  // ── TV AutoPilot — runs show automatically ────────────────────────────────
+  const advanceRundown = useCallback(() => {
+    const rd = rundownRef.current;
+    const idx = rundownIndexRef.current;
+    if (!autoPilotRef.current || rd.length === 0) return;
+
+    const segment = rd[idx];
+    if (!segment) {
+      // End of rundown — restart or stop
+      setAutoPilot(false);
+      toast('AutoPilot: Rundown complete');
+      return;
+    }
+
+    // Switch to this segment's scene
+    const sceneId = segment.sceneId;
+    if (sceneId) {
+      setCurrentSceneId(sceneId);
+      toast(`▶ AUTO: ${segment.title}`, { duration: 1200 });
+    }
+
+    // Mark as live, update rundown
+    setRundown(prev => prev.map((s, i) => ({
+      ...s,
+      status: i === idx ? 'live' : i < idx ? 'done' : 'pending'
+    })));
+
+    const nextIdx = idx + 1;
+    setRundownCurrentIndex(nextIdx);
+
+    // Schedule next segment
+    const dur = (segment.plannedDuration || 30) * 1000;
+    autoPilotTimerRef.current = setTimeout(advanceRundown, dur);
+
+    // Preload next 2 scenes
+    const nextIds = rd.slice(nextIdx, nextIdx + 2).map(s => s.sceneId);
+    preloadScenes(nextIds);
+  }, [preloadScenes]);
+
+  const startAutoPilot = useCallback(() => {
+    if (rundown.length === 0) {
+      toast.error('Add rundown segments first');
+      return;
+    }
+    setAutoPilot(true);
+    setRundownCurrentIndex(0);
+    setRundown(prev => prev.map(s => ({ ...s, status: 'pending' })));
+    toast.success('AutoPilot started — TV running automatically');
+    setTimeout(advanceRundown, 100);
+  }, [rundown, advanceRundown]);
+
+  const stopAutoPilot = useCallback(() => {
+    if (autoPilotTimerRef.current) clearTimeout(autoPilotTimerRef.current);
+    setAutoPilot(false);
+    toast('AutoPilot stopped');
   }, []);
 
   // ── Scene management ──────────────────────────────────────────────────────
@@ -485,6 +685,11 @@ export function useStudioEngine() {
     transitionRef.current = { active: true, alpha: 1, direction: -1 };
     setCurrentSceneId(id);
     toast(`▶ ${toName}`, { duration: 800 });
+
+    // If autoDJ is on and switching to music scene, keep playing
+    if (autoDJRef.current.autoSwitchToLive && autoDJRef.current.status === 'playing') {
+      // AutoDj continues in background
+    }
   }, []);
 
   const setPreviewScene = useCallback((id: string) => setPreviewSceneId(id), []);
@@ -526,7 +731,7 @@ export function useStudioEngine() {
       setScenes(prev => prev.map(s => s.id === sceneId ? { ...s, thumbnail: thumb } : s));
       toast.success('Thumbnail captured');
     };
-    if ('requestIdleCallback' in window) requestIdleCallback(capture);
+    if ('requestIdleCallback' in window) (window as Window & typeof globalThis & { requestIdleCallback: (cb: () => void) => void }).requestIdleCallback(capture);
     else setTimeout(capture, 0);
   }, []);
 
@@ -556,20 +761,27 @@ export function useStudioEngine() {
   const loadMedia = useCallback((sceneId: string, url: string, type: 'video' | 'image') => {
     setScenes(prev => prev.map(s => {
       if (s.id !== sceneId) return s;
-      if (type === 'video') return { ...s, mediaUrl: url };
-      return { ...s, imageUrl: url, thumbnail: url };
+      if (type === 'video') return { ...s, mediaUrl: url, sourceType: 'video' };
+      return { ...s, imageUrl: url, thumbnail: url, sourceType: 'image' };
     }));
     if (type === 'video' && mediaVideoRef.current) {
       const video = mediaVideoRef.current;
       video.src = url;
       video.loop = true;
       video.preload = 'auto';
-      // Key fix: set these attributes for smooth playback
       video.playsInline = true;
       video.muted = true;
+      // Critical: force 1x playback rate to prevent slow motion
+      video.playbackRate = 1.0;
+      video.defaultPlaybackRate = 1.0;
       video.load();
-      // Start buffering immediately
-      video.play().then(() => video.pause()).catch(() => {});
+      // Buffer the video immediately
+      const canPlay = () => {
+        video.playbackRate = 1.0;
+        video.pause(); // Preloaded, don't auto-play
+        video.removeEventListener('canplay', canPlay);
+      };
+      video.addEventListener('canplay', canPlay);
     }
     if (type === 'image' && mediaImageRef.current) mediaImageRef.current.src = url;
   }, []);
@@ -585,38 +797,45 @@ export function useStudioEngine() {
     if (scene.sourceType === 'color' || scene.sourceType === 'text') {
       ctx.fillStyle = scene.bgColor || '#0d0d1a';
       ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
-    } else if (scene.sourceType === 'camera' && videoElemRef.current && videoElemRef.current.readyState >= 2) {
-      if (applyChroma && chromaKey.enabled) {
-        if (!offscreenRef.current) {
-          offscreenRef.current = document.createElement('canvas');
-          offscreenRef.current.width = CANVAS_W;
-          offscreenRef.current.height = CANVAS_H;
-        }
-        const off = offscreenRef.current;
-        const offCtx = off.getContext('2d', { willReadFrequently: true });
-        if (offCtx) {
-          offCtx.imageSmoothingEnabled = true;
-          offCtx.imageSmoothingQuality = 'high';
-          offCtx.drawImage(videoElemRef.current, 0, 0, CANVAS_W, CANVAS_H);
-          applyChromaKey(offCtx, CANVAS_W, CANVAS_H, chromaKey.color, chromaKey.tolerance, chromaKey.softness);
-          ctx.drawImage(off, 0, 0);
+    } else if (scene.sourceType === 'camera') {
+      const vid = videoElemRef.current;
+      if (vid && vid.readyState >= 2 && vid.videoWidth > 0) {
+        if (applyChroma && chromaKey.enabled) {
+          if (!offscreenRef.current) {
+            offscreenRef.current = document.createElement('canvas');
+            offscreenRef.current.width = CANVAS_W;
+            offscreenRef.current.height = CANVAS_H;
+          }
+          const off = offscreenRef.current;
+          const offCtx = off.getContext('2d', { willReadFrequently: true });
+          if (offCtx) {
+            offCtx.imageSmoothingEnabled = true;
+            offCtx.imageSmoothingQuality = 'high';
+            offCtx.drawImage(vid, 0, 0, CANVAS_W, CANVAS_H);
+            applyChromaKey(offCtx, CANVAS_W, CANVAS_H, chromaKey.color, chromaKey.tolerance, chromaKey.softness);
+            ctx.drawImage(off, 0, 0);
+          }
+        } else {
+          ctx.drawImage(vid, 0, 0, CANVAS_W, CANVAS_H);
         }
       } else {
-        ctx.drawImage(videoElemRef.current, 0, 0, CANVAS_W, CANVAS_H);
+        ctx.fillStyle = '#0d0d1a';
+        ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+        ctx.fillStyle = 'rgba(255,255,255,0.1)';
+        ctx.font = '16px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('Camera not active', CANVAS_W / 2, CANVAS_H / 2);
       }
     } else if (scene.sourceType === 'video') {
       const mv = mediaVideoRef.current;
       ctx.fillStyle = '#000';
       ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
-      if (mv && mv.readyState >= 2 && !mv.paused && !mv.ended) {
+      if (mv && mv.readyState >= 2) {
         const vw = mv.videoWidth || CANVAS_W;
         const vh = mv.videoHeight || CANVAS_H;
         const scale = Math.min(CANVAS_W / vw, CANVAS_H / vh);
         const dw = vw * scale, dh = vh * scale;
         ctx.drawImage(mv, (CANVAS_W - dw) / 2, (CANVAS_H - dh) / 2, dw, dh);
-      } else if (mv && mv.readyState >= 1) {
-        // Draw last frame even if paused
-        try { ctx.drawImage(mv, 0, 0, CANVAS_W, CANVAS_H); } catch {}
       }
     } else if (scene.sourceType === 'image' && mediaImageRef.current && mediaImageRef.current.complete && mediaImageRef.current.naturalWidth > 0) {
       ctx.fillStyle = '#000';
@@ -719,6 +938,17 @@ export function useStudioEngine() {
       ctx.fillText('🎵 ' + dj.currentItem.title.slice(0, 30), 8, 19);
     }
 
+    // AutoPilot indicator
+    if (autoPilotRef.current) {
+      ctx.fillStyle = 'rgba(16,185,129,0.8)';
+      ctx.fillRect(CANVAS_W - 120, 8, 112, 22);
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 10px monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('⚡ AUTOPILOT', CANVAS_W - 64, 19);
+    }
+
     // Ticker
     if (tickerVisible && ticker) {
       const barH = 52, barY = CANVAS_H - barH;
@@ -756,7 +986,7 @@ export function useStudioEngine() {
       ctx.fillText(text, capX + 16, capY + capH / 2);
     }
 
-    // Pinned chat message overlay
+    // Pinned chat message
     const now = Date.now();
     if (chatOverlayEnabledRef.current && pinnedChatRef.current && now < pinnedChatRef.current.until) {
       const msg = pinnedChatRef.current;
@@ -815,15 +1045,32 @@ export function useStudioEngine() {
         mv.preload = 'auto';
         mv.playsInline = true;
         mv.muted = true;
+        mv.defaultPlaybackRate = 1.0;
+        mv.playbackRate = 1.0;
       }
+      // Ensure playback rate is always 1.0 (never slow)
+      mv.playbackRate = 1.0;
       mv.play().catch(() => {});
-    } else if (mediaVideoRef.current && scene.sourceType !== 'video') {
-      // Don't pause — keep buffered
     }
     if (scene.sourceType === 'image' && scene.imageUrl && mediaImageRef.current) {
       mediaImageRef.current.src = scene.imageUrl;
     }
   }, [currentSceneId, scenes]);
+
+  // Continuously enforce playbackRate = 1.0 on media video
+  useEffect(() => {
+    const mv = mediaVideoRef.current;
+    if (!mv) return;
+    const enforce = () => {
+      if (mv.playbackRate !== 1.0) mv.playbackRate = 1.0;
+    };
+    mv.addEventListener('ratechange', enforce);
+    mv.addEventListener('play', enforce);
+    return () => {
+      mv.removeEventListener('ratechange', enforce);
+      mv.removeEventListener('play', enforce);
+    };
+  }, []);
 
   // VU meter polling
   useEffect(() => {
@@ -848,7 +1095,7 @@ export function useStudioEngine() {
       bytesRef.current = 0;
       lastByteTimeRef.current = now;
       const score = kbps > 2000 ? 95 : kbps > 1000 ? 75 : kbps > 500 ? 55 : kbps > 0 ? 35 : 0;
-      const status = score >= 80 ? 'encoding' : score >= 50 ? 'degraded' : score > 0 ? 'critical' : 'idle';
+      const status: StreamHealth['encoderStatus'] = score >= 80 ? 'encoding' : score >= 50 ? 'degraded' : score > 0 ? 'critical' : 'idle';
       setHealth(h => ({ ...h, estimatedBitrate: kbps, encoderStatus: status, score }));
       analyticsDataRef.current.healthHistory.push({ time: now, score, bitrate: kbps });
       if (kbps > analyticsDataRef.current.peakBitrate) analyticsDataRef.current.peakBitrate = kbps;
@@ -859,33 +1106,82 @@ export function useStudioEngine() {
     return () => { if (healthRef.current) clearInterval(healthRef.current); };
   }, [isLive, isRecording]);
 
-  // ── Output — fixed smooth recording ───────────────────────────────────────
+  // ── WHIP stream recovery ──────────────────────────────────────────────────
+  const attemptStreamRecovery = useCallback(async () => {
+    if (!isLive || !programStreamRef.current) return;
+    const attempt = ++streamRecoveryAttemptsRef.current;
+    const delay = Math.min(5000 * Math.pow(1.5, attempt - 1), 30000);
+    toast(`Stream reconnecting... attempt ${attempt} (${delay / 1000}s)`);
+
+    streamRecoveryRef.current = setTimeout(async () => {
+      try {
+        const out = output;
+        if (!out.whipUrl || !programStreamRef.current) return;
+        const pc = new RTCPeerConnection({
+          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }]
+        });
+        programStreamRef.current.getTracks().forEach(t => pc.addTrack(t, programStreamRef.current!));
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        const resp = await fetch(out.whipUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/sdp', ...(out.streamKey ? { Authorization: `Bearer ${out.streamKey}` } : {}) },
+          body: offer.sdp,
+        });
+        if (!resp.ok) throw new Error(`WHIP ${resp.status}`);
+        const answer = await resp.text();
+        await pc.setRemoteDescription({ type: 'answer', sdp: answer });
+        pc.onconnectionstatechange = () => {
+          if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+            whipPcRef.current = null;
+            attemptStreamRecovery();
+          } else if (pc.connectionState === 'connected') {
+            streamRecoveryAttemptsRef.current = 0;
+            toast.success('Stream reconnected!');
+          }
+        };
+        whipPcRef.current = pc;
+      } catch (err) {
+        console.error('Recovery failed:', err);
+        attemptStreamRecovery();
+      }
+    }, delay);
+  }, [isLive, output]);
+
+  // ── Output ────────────────────────────────────────────────────────────────
   const startOutput = useCallback(async () => {
     const canvas = canvasRef.current;
     if (!canvas) { toast.error('Canvas not ready'); return; }
     try {
       await initAudio(cameraStream ?? undefined);
-      const [rw, rh] = RESOLUTION_MAP[output.resolution] || [1280, 720];
-      canvas.width = rw;
-      canvas.height = rh;
+      // CRITICAL: Do NOT resize canvas during recording — keep at CANVAS_W x CANVAS_H
+      // Resizing mid-recording breaks frame timing and causes slow-motion playback
+      const fps = output.fps || 30;
 
-      // Use high framerate canvas stream for smooth recording
-      const canvasStream = canvas.captureStream(output.fps);
-      const tracks = [...canvasStream.getVideoTracks()];
-      if (destRef.current) tracks.push(...destRef.current.stream.getAudioTracks());
+      // Capture stream at exact fps — this is crucial for correct playback speed
+      const canvasStream = canvas.captureStream(fps);
+      const tracks: MediaStreamTrack[] = [...canvasStream.getVideoTracks()];
+
+      // Add audio if available
+      if (destRef.current) {
+        const audioTracks = destRef.current.stream.getAudioTracks();
+        tracks.push(...audioTracks);
+      }
+
       const programStream = new MediaStream(tracks);
+      programStreamRef.current = programStream;
 
       analyticsDataRef.current = { ...DEFAULT_ANALYTICS, sessionStart: Date.now() };
       sceneTimerRef.current = { id: currentSceneId, start: Date.now() };
+      bytesRef.current = 0;
+      lastByteTimeRef.current = Date.now();
 
-      // Get best MIME type — avoid VP9 on mobile for smooth playback
+      // VP8 is the safest for smooth recording across all devices
       const mimeType = getBestMimeType();
       mimeTypeRef.current = mimeType;
-
-      // Calculate video bitrate — ensure smooth recording
       const videoBitsPerSecond = output.bitrate * 1000;
-      // Use small timeslice (100ms) for smooth chunk delivery and no stuttering
-      const TIMESLICE_MS = 100;
+      // 250ms timeslice = good balance of smooth chunks vs overhead
+      const TIMESLICE_MS = 250;
 
       if (output.mode === 'folder') {
         let dirHandle: FileSystemDirectoryHandle;
@@ -907,9 +1203,10 @@ export function useStudioEngine() {
         };
         recorder.onstop = async () => {
           if (folderWriterRef.current) { await folderWriterRef.current.close(); folderWriterRef.current = null; }
-          toast.success(`Saved: ${fileName}`);
+          const blob = new Blob(chunksRef.current, { type: mimeType });
+          setLastRecordingBlob({ blob, name: fileName });
+          toast.success(`Saved to folder: ${fileName}`);
         };
-        // Small timeslice = smooth chunks, no buffering
         recorder.start(TIMESLICE_MS);
         recorderRef.current = recorder;
         setIsRecording(true);
@@ -924,8 +1221,8 @@ export function useStudioEngine() {
           if (e.data.size > 0) { chunksRef.current.push(e.data); bytesRef.current += e.data.size; }
         };
         recorder.onstop = () => {
-          // Create a single clean blob from all chunks
           const blob = new Blob(chunksRef.current, { type: mimeType });
+          setLastRecordingBlob({ blob, name: `broadcast-${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-')}.webm` });
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a');
           a.href = url;
@@ -933,20 +1230,23 @@ export function useStudioEngine() {
           document.body.appendChild(a);
           a.click();
           document.body.removeChild(a);
-          setTimeout(() => URL.revokeObjectURL(url), 5000);
-          toast.success('Recording downloaded');
+          setTimeout(() => URL.revokeObjectURL(url), 10000);
+          toast.success('Recording downloaded — also available for cloud upload');
         };
-        // CRITICAL: use small timeslice for smooth video with no buffering artifacts
         recorder.start(TIMESLICE_MS);
         recorderRef.current = recorder;
         setIsRecording(true);
         setDuration(0);
         durationRef.current = setInterval(() => setDuration(d => d + 1), 1000);
-        toast.success('Recording started — smooth 30/60fps');
+        toast.success(`Recording started @ ${fps}fps`);
 
       } else if (output.mode === 'whip') {
         if (!output.whipUrl) { toast.error('Enter WHIP endpoint URL'); return; }
-        const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] });
+        streamRecoveryAttemptsRef.current = 0;
+        const pc = new RTCPeerConnection({
+          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }]
+        });
+        whipPcRef.current = pc;
         tracks.forEach(t => pc.addTrack(t, programStream));
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
@@ -960,8 +1260,11 @@ export function useStudioEngine() {
         await pc.setRemoteDescription({ type: 'answer', sdp: answer });
         pc.onconnectionstatechange = () => {
           if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
-            toast.error('Stream connection lost');
-            setIsLive(false);
+            toast.error('Stream dropped — attempting recovery...');
+            whipPcRef.current = null;
+            attemptStreamRecovery();
+          } else if (pc.connectionState === 'connected') {
+            streamRecoveryAttemptsRef.current = 0;
           }
         };
         setIsLive(true);
@@ -970,12 +1273,13 @@ export function useStudioEngine() {
         toast.success('🔴 LIVE via WHIP WebRTC');
 
       } else if (output.mode === 'rtmp') {
-        toast('RTMP requires a relay server (nginx-rtmp, Node-Media-Server). Starting local recording for now.', { duration: 5000 });
+        toast('RTMP requires relay server. Recording locally instead.', { duration: 4000 });
         chunksRef.current = [];
         const recorder = new MediaRecorder(programStream, { mimeType, videoBitsPerSecond, audioBitsPerSecond: 128000 });
         recorder.ondataavailable = e => { if (e.data.size > 0) { chunksRef.current.push(e.data); bytesRef.current += e.data.size; } };
         recorder.onstop = () => {
           const blob = new Blob(chunksRef.current, { type: mimeType });
+          setLastRecordingBlob({ blob, name: `rtmp-session-${new Date().toISOString().slice(0, 10)}.webm` });
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a');
           a.href = url;
@@ -983,8 +1287,7 @@ export function useStudioEngine() {
           document.body.appendChild(a);
           a.click();
           document.body.removeChild(a);
-          setTimeout(() => URL.revokeObjectURL(url), 5000);
-          toast.success('Session saved');
+          setTimeout(() => URL.revokeObjectURL(url), 10000);
         };
         recorder.start(TIMESLICE_MS);
         recorderRef.current = recorder;
@@ -996,9 +1299,11 @@ export function useStudioEngine() {
       console.error('Output error:', err);
       toast.error(`Failed: ${(err as Error).message}`);
     }
-  }, [output, cameraStream, initAudio, currentSceneId]);
+  }, [output, cameraStream, initAudio, currentSceneId, attemptStreamRecovery]);
 
   const stopOutput = useCallback(async () => {
+    if (streamRecoveryRef.current) clearTimeout(streamRecoveryRef.current);
+    if (whipPcRef.current) { whipPcRef.current.close(); whipPcRef.current = null; }
     if (recorderRef.current && recorderRef.current.state !== 'inactive') {
       recorderRef.current.stop();
       recorderRef.current = null;
@@ -1008,11 +1313,11 @@ export function useStudioEngine() {
     if (healthRef.current) clearInterval(healthRef.current);
     analyticsDataRef.current.sessionEnd = Date.now();
     setAnalytics({ ...analyticsDataRef.current });
-    if (canvasRef.current) { canvasRef.current.width = CANVAS_W; canvasRef.current.height = CANVAS_H; }
     setIsRecording(false);
     setIsLive(false);
     setDuration(0);
     setHealth(DEFAULT_HEALTH);
+    programStreamRef.current = null;
     toast('Output stopped');
   }, []);
 
@@ -1029,7 +1334,6 @@ export function useStudioEngine() {
   const pinChatMessage = useCallback((msg: { author: string; text: string }) => {
     pinnedChatRef.current = { ...msg, until: Date.now() + 10000 };
     setPinnedChatMessage(msg);
-    toast(`Chat pinned: "${msg.text.slice(0, 30)}…"`);
   }, []);
   const unpinChatMessage = useCallback(() => {
     pinnedChatRef.current = null;
@@ -1054,8 +1358,6 @@ export function useStudioEngine() {
   const removeOverlay = useCallback((sceneId: string, ovId: string) => {
     setScenes(prev => prev.map(s => s.id === sceneId ? { ...s, overlays: (s.overlays || []).filter(o => o.id !== ovId) } : s));
   }, []);
-
-  // Bulk replace overlays (for lower-third templates)
   const replaceOverlays = useCallback((sceneId: string, overlays: Omit<OverlayText, 'id'>[]) => {
     const withIds: OverlayText[] = overlays.map((ov, i) => ({ ...ov, id: `ov-lt-${Date.now()}-${i}` }));
     setScenes(prev => prev.map(s => s.id === sceneId ? { ...s, overlays: withIds } : s));
@@ -1065,16 +1367,24 @@ export function useStudioEngine() {
   }, []);
 
   // ── Rundown ───────────────────────────────────────────────────────────────
-  const addRundownSegment = useCallback((seg: Omit<RundownSegment, 'id'>) => { setRundown(prev => [...prev, { ...seg, id: `rd-${Date.now()}` }]); }, []);
+  const addRundownSegment = useCallback((seg: Omit<RundownSegment, 'id'>) => {
+    setRundown(prev => [...prev, { ...seg, id: `rd-${Date.now()}` }]);
+  }, []);
   const removeRundownSegment = useCallback((id: string) => setRundown(prev => prev.filter(s => s.id !== id)), []);
-  const updateRundownSegment = useCallback((id: string, patch: Partial<RundownSegment>) => { setRundown(prev => prev.map(s => s.id === id ? { ...s, ...patch } : s)); }, []);
+  const updateRundownSegment = useCallback((id: string, patch: Partial<RundownSegment>) => {
+    setRundown(prev => prev.map(s => s.id === id ? { ...s, ...patch } : s));
+  }, []);
 
   // ── Ads ───────────────────────────────────────────────────────────────────
-  const addAdSlot = useCallback((ad: Omit<AdSlot, 'id'>) => { setAdSlots(prev => [...prev, { ...ad, id: `ad-${Date.now()}` }]); }, []);
+  const addAdSlot = useCallback((ad: Omit<AdSlot, 'id'>) => {
+    setAdSlots(prev => [...prev, { ...ad, id: `ad-${Date.now()}` }]);
+  }, []);
   const removeAdSlot = useCallback((id: string) => setAdSlots(prev => prev.filter(a => a.id !== id)), []);
 
   // ── Chroma ────────────────────────────────────────────────────────────────
-  const updateChromaKey = useCallback((patch: Partial<ChromaKeySettings>) => { setChromaKey(prev => ({ ...prev, ...patch })); }, []);
+  const updateChromaKey = useCallback((patch: Partial<ChromaKeySettings>) => {
+    setChromaKey(prev => ({ ...prev, ...patch }));
+  }, []);
 
   // Cleanup
   useEffect(() => {
@@ -1083,6 +1393,8 @@ export function useStudioEngine() {
       if (previewRafRef.current) cancelAnimationFrame(previewRafRef.current);
       if (durationRef.current) clearInterval(durationRef.current);
       if (healthRef.current) clearInterval(healthRef.current);
+      if (autoPilotTimerRef.current) clearTimeout(autoPilotTimerRef.current);
+      if (streamRecoveryRef.current) clearTimeout(streamRecoveryRef.current);
       cameraStream?.getTracks().forEach(t => t.stop());
       pipStream?.getTracks().forEach(t => t.stop());
       autoDJAudioRef.current?.pause();
@@ -1100,6 +1412,7 @@ export function useStudioEngine() {
     state, cameras, cameraStream, pipStream, guestStream, facingMode,
     ticker, tickerVisible, rundown, adSlots, analytics, autoDJ, playlists,
     hotkeys, guestLayout, listenerCount, stationName,
+    autoPilot, rundownCurrentIndex, lastRecordingBlob,
     analyser: analyserRef.current,
     canvasRef, previewCanvasRef, videoElemRef, mediaVideoRef, mediaImageRef, pipVideoRef, guestVideoRef,
     startCamera, stopCamera, flipCamera, startPip, stopPip,
@@ -1116,10 +1429,13 @@ export function useStudioEngine() {
     updateChromaKey,
     handleGuestStream, updateCaption, enableCaptions, disableCaptions,
     pinChatMessage, unpinChatMessage, toggleChatOverlay,
-    autoDJPlay, autoDJPause, autoDJSkip, autoDJSetMode, autoDJSetPlaylist,
+    autoDJPlay, autoDJPause, autoDJSkip, autoDJStop, autoDJSetMode, autoDJSetPlaylist,
     autoDJSetCrossfade, autoDJSetAdInterval, autoDJToggleAutoSwitch,
     addPlaylist, removePlaylist, addMediaToPlaylist, removeMediaFromPlaylist,
     setHotkeys: (h: SceneHotkey[]) => setHotkeys(h),
     setGuestLayout, setListenerCount, setStationName,
+    startAutoPilot, stopAutoPilot,
+    preloadScenes,
+    clearLastRecording: () => setLastRecordingBlob(null),
   };
 }
